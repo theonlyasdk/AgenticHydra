@@ -1,0 +1,6 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="108dp" android:height="108dp" android:viewportWidth="108" android:viewportHeight="108">
+    <!-- Optically centered to balance the three upper branches; stays inside the adaptive icon safe zone. -->
+    <group android:translateY="6">
+    <path android:fillColor="@android:color/transparent" android:strokeColor="@color/hydra_icon_foreground" android:strokeWidth="4" android:strokeLineCap="round" android:strokeLineJoin="round" android:pathData="M54,78L54,34M54,62C38,62 34,53 34,35M54,62C70,62 74,53 74,35M28,37L34,30L40,37M48,41L54,34L60,41M68,37L74,30L80,37" />
+    </group>
+</vector>

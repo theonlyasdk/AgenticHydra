@@ -1,0 +1,10 @@
+<resources>
+    <color name="hydra_icon_background_light">#D5EEF0</color>
+    <color name="hydra_icon_background_dark">#0C1318</color>
+    <color name="hydra_icon_foreground_light">#006B75</color>
+    <color name="hydra_icon_foreground_dark">#80D5DE</color>
+    <color name="hydra_icon_background">@color/hydra_icon_background_light</color>
+    <color name="hydra_icon_foreground">@color/hydra_icon_foreground_light</color>
+    <color name="hydra_window_background">#F3F7FA</color>
+    <bool name="hydra_light_system_bars">true</bool>
+</resources>

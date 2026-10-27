@@ -1,0 +1,28 @@
+<resources>
+    <style name="AppTheme" parent="android:style/Theme.Material.Light.NoActionBar">
+        <item name="android:fontFamily">sans</item>
+        <item name="android:windowLightStatusBar">@bool/hydra_light_system_bars</item>
+        <item name="android:windowActionModeOverlay">true</item>
+        <item name="android:windowBackground">@color/hydra_window_background</item>
+    </style>
+    <style name="HydraStarting" parent="Theme.SplashScreen">
+        <item name="windowSplashScreenBackground">@color/hydra_icon_background</item>
+        <item name="windowSplashScreenAnimatedIcon">@drawable/hydra_splash</item>
+        <item name="postSplashScreenTheme">@style/AppTheme</item>
+        <item name="android:colorAccent">@color/hydra_icon_foreground</item>
+        <item name="android:windowLightStatusBar">@bool/hydra_light_system_bars</item>
+        <item name="android:windowLightNavigationBar">@bool/hydra_light_system_bars</item>
+    </style>
+    <style name="HydraStartingLight" parent="HydraStarting">
+        <item name="windowSplashScreenBackground">@color/hydra_icon_background_light</item>
+        <item name="android:colorAccent">@color/hydra_icon_foreground_light</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:windowLightNavigationBar">true</item>
+    </style>
+    <style name="HydraStartingDark" parent="HydraStarting">
+        <item name="windowSplashScreenBackground">@color/hydra_icon_background_dark</item>
+        <item name="android:colorAccent">@color/hydra_icon_foreground_dark</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowLightNavigationBar">false</item>
+    </style>
+</resources>
