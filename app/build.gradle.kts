@@ -51,6 +51,9 @@ dependencies {
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("org.jsoup:jsoup:1.18.3")
     implementation("androidx.documentfile:documentfile:1.0.1")
+    // WorkManager 2.10 supports this project's compileSdk 35 toolchain.
+    //noinspection GradleDependency
+    implementation("androidx.work:work-runtime-ktx:2.10.1")
     implementation("io.noties.markwon:core:4.6.2")
     implementation("io.noties.markwon:ext-tables:4.6.2")
     implementation("io.noties.markwon:ext-strikethrough:4.6.2")
@@ -59,6 +62,8 @@ dependencies {
     testImplementation("org.json:json:20240303")
     testImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
     testImplementation("org.robolectric:robolectric:4.14.1")
+    //noinspection GradleDependency
+    testImplementation("androidx.work:work-testing:2.10.1")
     testImplementation("androidx.compose.ui:ui-test-junit4")
     debugImplementation("androidx.compose.ui:ui-tooling")
 }

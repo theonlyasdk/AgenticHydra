@@ -17,6 +17,7 @@ class ToolPolicyTest {
         listOf("read_file","list_files","write_file","run_command").forEach{tool->
             assertTrue(ToolPolicy.approval(ApprovalMode.EVERY,tool))
             assertFalse(ToolPolicy.approval(ApprovalMode.SESSION,tool))
+            assertFalse(ToolPolicy.approval(ApprovalMode.FULL,tool))
         }
         assertFalse(ToolPolicy.approval(ApprovalMode.CHANGES,"read_file"))
         assertFalse(ToolPolicy.approval(ApprovalMode.CHANGES,"list_files"))

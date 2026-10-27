@@ -47,12 +47,14 @@ class WorkConversationUiTest:AppUiTestBase() {
         compose.onNodeWithText("Decline").performClick()
         compose.waitUntil(15000){org.robolectric.shadows.ShadowLooper.idleMainLooper();!work.running}
         assertEquals("Declined",work.steps.single().state)
-        compose.onNodeWithText("git status",substring=false).performClick()
+        compose.onNodeWithText("Arguments",substring=false).assertDoesNotExist()
+        compose.onNodeWithText("Check Git status",substring=false).performClick()
         compose.onNodeWithTag("work-tool-${work.steps.single().id}-details").assertIsDisplayed()
         compose.onNodeWithText("Arguments",substring=false).assertIsDisplayed()
         compose.onNodeWithText("Result",substring=false).assertIsDisplayed()
         screenshot("work-expanded-tool-cards")
-        compose.onNodeWithText("git status",substring=false).performClick()
+        compose.onNodeWithContentDescription("Close tool details").performClick()
+        compose.mainClock.advanceTimeBy(500)
         val id=work.records.single().id
         val restored=WorkModel(application)
         assertEquals(id,restored.records.single().id)

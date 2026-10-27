@@ -26,7 +26,9 @@ Bring your own provider credentials or connect a local model server. Hydra does 
 | :-- | :-- |
 | **Chat** | Stream responses, continue saved conversations, rename or export chats, and copy or share answers. Read Markdown with code blocks, tables, and response timing. |
 | **Work** | Open a dedicated task conversation, select a project folder, attach files or images, and send follow-ups with the previous context. |
-| **17 tools** | Read and edit files, search a project, search the web, fetch pages, inspect Git changes, and run commands through Termux. |
+| **48 tools** | Read and edit files, search the web in batches, inspect Git changes, run Termux commands, and use permission-aware device tools. |
+| **Scheduling** | Wait within a turn or schedule persistent follow-ups with bounded repeats. View and cancel schedules from Work. |
+| **Questions** | Answer single-choice, multiple-choice, yes/no, and text questions in a step-by-step sheet, then let the agent continue with your answers. |
 | **Visible approvals** | Inspect tool arguments and results inline. Allow or decline actions directly in the conversation, with configurable approval policies. |
 | **Model choice** | Connect NVIDIA NIM, Gemini, Ollama, llama.cpp, or another OpenAI-compatible endpoint. Browse models, enter a custom ID, and adjust reasoning on supported models. |
 | **Native feel** | Material 3 surfaces, dynamic color, light and dark themes, animated model controls, and daily greetings with rotating suggestions. |
@@ -61,7 +63,7 @@ Official release APKs use a persistent signing key so updates can preserve app d
 
 Open **Work → New task**. Use the composer's **+** menu to attach files or media, or choose a shared-storage project directory. Describe the task and review the inline permission requests as Hydra works. Reopen a saved task to continue it.
 
-File and web tools run in the app. Shell commands and Git tools additionally need [Termux setup](docs/GETTING_STARTED.md#termux-for-shell-and-git). Your selected model must support OpenAI-compatible tool calling; image attachments also need a compatible vision model. Provider capabilities and usage charges vary.
+File and web tools run in the app. Device tools can inspect status, control the flashlight and audio, open apps, and prepare dialer, email, clock, or calendar actions. See [device tools and questions](docs/DEVICE_TOOLS.md) for permissions and behavior. Shell commands and Git tools additionally need [Termux setup](docs/GETTING_STARTED.md#termux-for-shell-and-git). Your selected model must support OpenAI-compatible tool calling; image attachments also need a compatible vision model. Provider capabilities and usage charges vary.
 
 ## Build and contribute
 

@@ -63,7 +63,7 @@ internal class MarkdownRenderer(val markwon:Markwon,val metrics:MarkdownMetrics,
     val headings=MaterialTheme.typography.markdownHeadings.map{markdownMetrics(it)}
     val radius=MaterialTheme.shapes.extraSmall.topStart.toPx(Size(metrics.size*8,metrics.lineHeight.toFloat()),density)
     val foreground=cs.onSurface.toArgb();val link=cs.primary.toArgb();val codeBg=cs.surfaceContainerHigh.toArgb()
-    val horizontal=with(density){4.dp.toPx()};val vertical=with(density){2.dp.toPx()}
+    val horizontal=with(density){4.dp.toPx()};val vertical=horizontal
     val paragraphGap=with(density){8.dp.toPx().toInt()};val indent=with(density){16.dp.toPx().toInt()}
     return remember(context,metrics,code,headings,foreground,link,codeBg,radius,horizontal,vertical,paragraphGap,indent) {
         val markwon=Markwon.builder(context).usePlugin(StrikethroughPlugin.create()).usePlugin(TaskListPlugin.create(context))
@@ -103,14 +103,17 @@ private class MarkdownHeadingSpan(private val metrics:MarkdownMetrics):MetricAff
 internal class RoundedInlineCodeSpan(private val metrics:MarkdownMetrics,private val foreground:Int,private val background:Int,
     private val horizontal:Float,private val vertical:Float,private val radius:Float,private val baseTextSize:Float):ReplacementSpan() {
     private fun codePaint(original:Paint)=Paint(original).apply{typeface=metrics.typeface;textSize=metrics.size*original.textSize/baseTextSize;color=foreground}
+    // Markwon wraps inline code in non-breaking spaces. They are not visual padding.
+    private fun literal(text:CharSequence,start:Int,end:Int)=text.subSequence(start,end).toString().trim()
     override fun getSize(paint:Paint,text:CharSequence,start:Int,end:Int,fm:Paint.FontMetricsInt?):Int =
-        ceil(codePaint(paint).measureText(text,start,end)+2*horizontal).toInt()
+        ceil(codePaint(paint).measureText(literal(text,start,end))+2*horizontal).toInt()
     override fun draw(canvas:Canvas,text:CharSequence,start:Int,end:Int,x:Float,top:Int,y:Int,bottom:Int,paint:Paint) {
-        val code=codePaint(paint);val font=code.fontMetrics
+        val code=codePaint(paint);val value=literal(text,start,end)
+        val ink=android.graphics.Rect();code.getTextBounds(value,0,value.length,ink)
         val center=y+(paint.fontMetrics.ascent+paint.fontMetrics.descent)/2f
-        val height=font.descent-font.ascent+2*vertical
+        val height=ink.height()+2*vertical
         val width=getSize(paint,text,start,end,null).toFloat()
         canvas.drawRoundRect(RectF(x,center-height/2,x+width,center+height/2),radius,radius,Paint(Paint.ANTI_ALIAS_FLAG).apply{color=background})
-        canvas.drawText(text,start,end,x+horizontal,center-(font.ascent+font.descent)/2f,code)
+        canvas.drawText(value,x+horizontal,center-(ink.top+ink.bottom)/2f,code)
     }
 }

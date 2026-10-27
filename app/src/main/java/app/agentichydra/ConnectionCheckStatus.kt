@@ -62,7 +62,7 @@ import kotlinx.coroutines.delay
     }
 }
 
-@Composable fun ShimmerStatusText(text: String, modifier: Modifier = Modifier) {
+@Composable fun ShimmerStatusText(text: String, modifier: Modifier = Modifier, style:androidx.compose.ui.text.TextStyle=MaterialTheme.typography.bodyLarge, maxLines:Int=Int.MAX_VALUE) {
     val cs = MaterialTheme.colorScheme
     var textWidth by remember { mutableFloatStateOf(1f) }
     val shine by rememberInfiniteTransition(label = "Status shine").animateFloat(
@@ -70,7 +70,8 @@ import kotlinx.coroutines.delay
         animationSpec = infiniteRepeatable(tween(1400, easing = LinearEasing)), label = "Shine position")
     val highlight=if(cs.surface.luminance()<.5f)cs.inverseSurface else cs.surfaceContainerLowest
     Text(text, modifier.onSizeChanged { textWidth = it.width.coerceAtLeast(1).toFloat() },
-        style = MaterialTheme.typography.bodyLarge.copy(brush = Brush.linearGradient(
+        maxLines=maxLines,overflow=androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+        style = style.copy(brush = Brush.linearGradient(
             0f to cs.onSurfaceVariant, .3f to cs.onSurfaceVariant, .5f to highlight, .7f to cs.onSurfaceVariant, 1f to cs.onSurfaceVariant,
             start = Offset((shine - .3f) * textWidth, 0f), end = Offset((shine + .3f) * textWidth, 0f))))
 }

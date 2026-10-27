@@ -34,7 +34,7 @@ The history drawer opens saved chats. Long-press an item for rename, export, and
 
 The **+** menu supports text/code attachments through Android's file picker and images through the media picker. Text files are limited to 128 KiB, images to 4 MiB, and a message to four attachments. Image support depends on the selected provider and model. PDF and video attachments are not supported.
 
-The default approval policy asks before actions. Other policies can allow reads while asking for writes and commands, or allow the next task. One Work generation runs at a time, with up to 24 model turns per user message.
+The default **Ask for changes** policy allows reads and asks before writes and commands. You can also ask every time, allow the next task, or choose **Full access** to allow tools without prompts. Full access has an amber warning and stays enabled until changed. Approval preferences are remembered; the one-task option resets after that turn. One Work generation runs at a time, with up to 24 model turns per user message.
 
 ## Termux for shell and Git
 

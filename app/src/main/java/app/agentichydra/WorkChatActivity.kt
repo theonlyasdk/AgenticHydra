@@ -16,7 +16,8 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.compose.foundation.*
 import androidx.compose.animation.animateContentSize
-import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.*
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -48,29 +49,28 @@ private fun openWork(context:Context,id:String?=null) {
     val cs=MaterialTheme.colorScheme
     val context=LocalContext.current
     var query by rememberSaveable{mutableStateOf("")}
+    var options by remember{mutableStateOf<WorkRecord?>(null)}
     var delete by remember{mutableStateOf<WorkRecord?>(null)}
+    var rename by remember{mutableStateOf<WorkRecord?>(null)}
+    var title by rememberSaveable{mutableStateOf("")}
     var approvals by rememberSaveable{mutableStateOf(false)}
+    var scheduled by rememberSaveable{mutableStateOf(false)}
     val folder=rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()){uri->if(uri!=null)runCatching{vm.selectProject(uri)}.onFailure{vm.error=it.message}}
     val filtered=remember(vm.records,query){vm.records.filter{it.title.contains(query,true)||it.projectName.contains(query,true)}}
     Scaffold(containerColor=cs.background,topBar={TopAppBar(title={Text("Work",style=MaterialTheme.typography.titleLarge)},
-        colors=TopAppBarDefaults.topAppBarColors(containerColor=cs.background),actions={IconButton(onClick={approvals=true}){Icon(Icons.Outlined.Shield,"Tool approvals")}})},
+        colors=TopAppBarDefaults.topAppBarColors(containerColor=cs.background),actions={
+            IconButton(onClick={scheduled=true}){Icon(Icons.Outlined.Schedule,"Scheduled tasks")}
+            IconButton(onClick={approvals=true}){Icon(Icons.Outlined.Shield,"Tool approvals")}})},
         floatingActionButton={ExtendedFloatingActionButton(onClick={openWork(context,if(vm.running)vm.activeId else null)},
             icon={Icon(if(vm.running)Icons.Outlined.ChatBubbleOutline else Icons.Outlined.Add,null)},text={Text(if(vm.running)"Open running task"else "New task")})}) { padding ->
         Box(Modifier.fillMaxSize().padding(padding),contentAlignment=Alignment.TopCenter) {
             LazyColumn(Modifier.widthIn(max=840.dp).fillMaxSize(),contentPadding=PaddingValues(start=16.dp,end=16.dp,top=8.dp,bottom=112.dp),verticalArrangement=Arrangement.spacedBy(8.dp)) {
                 item {
-                    Surface(onClick={folder.launch(null)},enabled=!vm.running,color=cs.surfaceContainer,shape=MaterialTheme.shapes.large) {
-                        ListItem(headlineContent={MarqueeTitle(vm.projectName,surface=cs.surfaceContainer)},leadingContent={Icon(Icons.Outlined.FolderOpen,null,tint=cs.primary)},
-                            trailingContent={Icon(Icons.Outlined.UnfoldMore,null)},colors=ListItemDefaults.colors(containerColor=cs.surfaceContainer))
-                    }
+                    DockedSearchBar(inputField={SearchBarDefaults.InputField(query=query,onQueryChange={query=it},onSearch={},expanded=false,onExpandedChange={},
+                        placeholder={Text("Search tasks")},leadingIcon={Icon(Icons.Outlined.Search,null)})},expanded=false,onExpandedChange={},modifier=Modifier.fillMaxWidth()){}
                 }
                 vm.error?.let{error->item{WorkError(error){vm.error=null}}}
-                if(vm.records.isNotEmpty())item {
-                    OutlinedTextField(query,{query=it},singleLine=true,label={Text("Search tasks")},leadingIcon={Icon(Icons.Outlined.Search,null)},
-                        shape=MaterialTheme.shapes.extraLarge,modifier=Modifier.fillMaxWidth())
-                    Spacer(Modifier.height(8.dp))
-                    Text("Task conversations",style=MaterialTheme.typography.titleMedium,modifier=Modifier.padding(vertical=8.dp))
-                }
+                if(vm.records.isNotEmpty())item{Text("Task conversations",style=MaterialTheme.typography.titleMedium,modifier=Modifier.padding(vertical=8.dp))}
                 if(filtered.isEmpty())item {
                     Column(Modifier.fillMaxWidth().padding(vertical=48.dp),horizontalAlignment=Alignment.CenterHorizontally,verticalArrangement=Arrangement.spacedBy(16.dp)) {
                         HydraIllustration(Modifier.size(100.dp))
@@ -79,23 +79,52 @@ private fun openWork(context:Context,id:String?=null) {
                     }
                 }
                 items(filtered,key={it.id}) { record ->
+                    val active=vm.running&&vm.activeId==record.id
                     Surface(color=cs.surfaceContainerLow,shape=MaterialTheme.shapes.large,
-                        modifier=Modifier.fillMaxWidth().combinedClickable(onClick={openWork(context,record.id)},onLongClickLabel="Delete task conversation",onLongClick={delete=record})) {
+                        modifier=Modifier.fillMaxWidth().combinedClickable(onClick={openWork(context,record.id)},onLongClickLabel="Task options",onLongClick={options=record})) {
                         ListItem(headlineContent={MarqueeTitle(record.title,surface=cs.surfaceContainerLow)},
                             supportingContent={Column(verticalArrangement=Arrangement.spacedBy(4.dp)){
-                                Text(record.status,style=MaterialTheme.typography.labelMedium,color=if(record.status=="Failed")cs.error else cs.primary)
-                                MarqueeTitle(record.projectName,surface=cs.surfaceContainerLow,style=MaterialTheme.typography.bodySmall)
-                            }},leadingContent={Icon(Icons.Outlined.Terminal,null,tint=cs.primary)},
-                            trailingContent={IconButton(onClick={delete=record},enabled=!(vm.running&&vm.activeId==record.id)){Icon(Icons.Outlined.DeleteOutline,"Delete task history")}},
+                                MarqueeTitle(projectSubtitle(record.projectName,record.projectUri!=null,active),surface=cs.surfaceContainerLow,style=MaterialTheme.typography.bodySmall)
+                                if(active)WorkProgressLabel(vm.progress.ifBlank{"Thinking…"},cs.surfaceContainerLow)
+                                else Text(record.status,style=MaterialTheme.typography.labelSmall,color=if(record.status=="Failed")cs.error else cs.onSurfaceVariant)
+                            }},leadingContent={if(active)CircularProgressIndicator(Modifier.size(24.dp),strokeWidth=2.dp)else Icon(Icons.Outlined.Terminal,null,tint=cs.primary)},
+                            trailingContent={IconButton(onClick={options=record}){Icon(Icons.Outlined.MoreVert,"Task options")}},
                             colors=ListItemDefaults.colors(containerColor=cs.surfaceContainerLow))
                     }
                 }
             }
         }
     }
+    options?.let{record->HydraBottomSheet(onDismiss={options=null}){dismiss->
+        Column(Modifier.fillMaxWidth().padding(horizontal=16.dp).padding(bottom=24.dp)) {
+            MarqueeTitle(record.title,style=MaterialTheme.typography.titleLarge,surface=cs.surfaceContainerLow,modifier=Modifier.padding(bottom=16.dp))
+            TextButton(onClick={dismiss();openWork(context,record.id)},modifier=Modifier.fillMaxWidth()){Icon(Icons.Outlined.ChatBubbleOutline,null);Spacer(Modifier.width(12.dp));Text("Open conversation")}
+            TextButton(onClick={dismiss();title=record.title;rename=record},modifier=Modifier.fillMaxWidth()){Icon(Icons.Outlined.Edit,null);Spacer(Modifier.width(12.dp));Text("Rename")}
+            TextButton(onClick={dismiss();if(vm.viewRecord(record))folder.launch(null)},enabled=!vm.running,modifier=Modifier.fillMaxWidth()){Icon(Icons.Outlined.FolderOpen,null);Spacer(Modifier.width(12.dp));Text("Change directory")}
+            TextButton(onClick={dismiss();context.startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).setType("text/markdown").putExtra(Intent.EXTRA_TEXT,exportWorkRecord(record)),"Export task"))},modifier=Modifier.fillMaxWidth()){Icon(Icons.Outlined.Share,null);Spacer(Modifier.width(12.dp));Text("Export conversation")}
+            TextButton(onClick={dismiss();delete=record},enabled=!(vm.running&&vm.activeId==record.id),modifier=Modifier.fillMaxWidth()){Icon(Icons.Outlined.DeleteOutline,null,tint=cs.error);Spacer(Modifier.width(12.dp));Text("Delete",color=cs.error)}
+        }
+    }}
     if(approvals)ApprovalSheet(vm){approvals=false}
+    if(scheduled)TaskSchedulesSheet((context.applicationContext as HydraApplication).schedules){scheduled=false}
+    rename?.let{record->AlertDialog(onDismissRequest={rename=null},title={Text("Rename task")},text={OutlinedTextField(title,{title=it},label={Text("Task name")},singleLine=true)},
+        confirmButton={TextButton(onClick={vm.renameConversation(record.id,title);rename=null},enabled=title.isNotBlank()){Text("Rename")}},dismissButton={TextButton(onClick={rename=null}){Text("Cancel")}})}
     delete?.let{record->AlertDialog(onDismissRequest={delete=null},title={Text("Delete task conversation?")},text={Text("“${record.title}” and its messages will be removed. Project files are kept.")},
         confirmButton={TextButton(onClick={vm.deleteRecord(record);delete=null}){Text("Delete")}},dismissButton={TextButton(onClick={delete=null}){Text("Cancel")}})}
+}
+
+internal fun projectSubtitle(name:String,selected:Boolean,running:Boolean)=if(!selected)"Choose a project"else "${if(running)"Running in"else "Inside"} $name"
+@Composable private fun WorkProgressLabel(text:String,surface:androidx.compose.ui.graphics.Color) {
+    val scroll=rememberScrollState()
+    val direction=androidx.compose.ui.platform.LocalLayoutDirection.current
+    LaunchedEffect(text){scroll.scrollTo(0)}
+    Box(Modifier.fillMaxWidth().horizontalScrollFadingEdges(scroll,surface,direction).horizontalScroll(scroll)) {
+        ShimmerStatusText(text,style=MaterialTheme.typography.labelSmall,maxLines=1)
+    }
+}
+internal fun exportWorkRecord(record:WorkRecord)="# ${record.title}\n\n"+record.messages.joinToString("\n\n"){message->
+    if(message.role=="tool")record.steps.firstOrNull{it.id==message.id}?.let{"### ${it.tool}\n\n```json\n${it.arguments}\n```\n\n```text\n${it.output}\n```"}.orEmpty()
+    else "### ${message.role.replaceFirstChar{it.uppercase()}}\n\n${message.text}"
 }
 
 class WorkChatActivity:ComponentActivity() {
@@ -116,7 +145,7 @@ class WorkChatActivity:ComponentActivity() {
 
 data class WorkChatUiState(val title:String="New task",val project:String="Choose a project",val messages:List<Message> = emptyList(),
     val steps:List<WorkStep> = emptyList(),val pendingId:String?=null,val running:Boolean=false,val status:String="Ready",val error:String?=null,
-    val conversationId:String="new",val canSend:Boolean=true,val attachments:List<MessageAttachment> = emptyList(),val attaching:Boolean=false)
+    val conversationId:String="new",val canSend:Boolean=true,val attachments:List<MessageAttachment> = emptyList(),val attaching:Boolean=false,val progress:String="",val hasProject:Boolean=true)
 
 class WorkChatActions(val onSend:()->Unit={},val onStop:()->Unit={},val onBack:()->Unit={},val onProject:()->Unit={},val onFiles:()->Unit={},
     val onChanges:()->Unit={},val onApprovals:()->Unit={},val onConnections:()->Unit={},val onApprove:(String,Boolean)->Unit={_,_->},val onDismissError:()->Unit={},
@@ -136,8 +165,8 @@ class WorkChatActions(val onSend:()->Unit={},val onStop:()->Unit={},val onBack:(
     var renameTitle by rememberSaveable{mutableStateOf("")}
     val active=vm.activeId==id
     val saved=vm.records.firstOrNull{it.id==id}
-    val state=if(active)WorkChatUiState(vm.task.ifBlank{"New task"},vm.projectName,vm.messages,vm.steps,vm.pendingApproval?.id,vm.running,vm.status,vm.error,id,attachments=vm.draftAttachments,attaching=vm.attaching)
-        else WorkChatUiState(saved?.title?:"Task unavailable",saved?.projectName?:"",saved?.messages.orEmpty(),saved?.steps.orEmpty(),status=saved?.status?:"Deleted",conversationId=id,canSend=!vm.running&&saved!=null)
+    val state=if(active)WorkChatUiState(vm.task.ifBlank{"New task"},vm.projectName,vm.messages,vm.steps,vm.pendingApproval?.id,vm.running,vm.status,vm.error,id,attachments=vm.draftAttachments,attaching=vm.attaching,progress=vm.progress,hasProject=vm.projectUri!=null)
+        else WorkChatUiState(saved?.title?:"Task unavailable",saved?.projectName?:"",saved?.messages.orEmpty(),saved?.steps.orEmpty(),status=saved?.status?:"Deleted",conversationId=id,canSend=!vm.running&&saved!=null,hasProject=saved?.projectUri!=null)
     fun activate()=vm.activeId==id||saved?.let{vm.viewRecord(it)}==true
     LaunchedEffect(vm,id) {
         vm.toasts.collect{event->
@@ -146,6 +175,10 @@ class WorkChatActions(val onSend:()->Unit={},val onStop:()->Unit={},val onBack:(
         }
     }
     val folder=rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()){uri->if(uri!=null)runCatching{vm.selectProject(uri)}.onFailure{vm.error=it.message}}
+    var askedForProject by rememberSaveable(id){mutableStateOf(false)}
+    LaunchedEffect(id) {
+        if(active&&vm.projectUri==null&&vm.messages.isEmpty()&&!askedForProject){askedForProject=true;folder.launch(null)}
+    }
     val filePicker=rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()){uri->if(uri!=null&&activate())vm.attach(uri,media=false)}
     val mediaPicker=rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()){uri->if(uri!=null&&activate())vm.attach(uri,media=true)}
     val notifications=rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()){}
@@ -164,6 +197,10 @@ class WorkChatActions(val onSend:()->Unit={},val onStop:()->Unit={},val onBack:(
     if(approvals)ApprovalSheet(vm){approvals=false}
     if(files)WorkFilesSheet(vm){files=false}
     if(changes)WorkChangesSheet(vm.changes){changes=false}
+    if(active){
+        vm.pendingQuestions?.let{request->AgentQuestionSheet(request,{vm.answerQuestions(request.id,it)},{vm.answerQuestions(request.id,null)})}
+        DeviceActionHost(vm)
+    }
     if(rename)AlertDialog(onDismissRequest={rename=false},title={Text("Rename task")},text={
         OutlinedTextField(renameTitle,{renameTitle=it},label={Text("Task name")},singleLine=true,shape=MaterialTheme.shapes.medium)
     },confirmButton={TextButton(onClick={vm.renameConversation(id,renameTitle);rename=false},enabled=renameTitle.isNotBlank()){Text("Rename")}},
@@ -178,7 +215,7 @@ class WorkChatActions(val onSend:()->Unit={},val onStop:()->Unit={},val onBack:(
     Scaffold(containerColor=cs.background,topBar={TopAppBar(title={Surface(onClick=actions.onRename,color=cs.background,shape=MaterialTheme.shapes.medium,
         modifier=Modifier.fillMaxWidth().heightIn(min=48.dp).semantics{contentDescription="Rename task"}){Column{
         MarqueeTitle(state.title,style=MaterialTheme.typography.titleMedium,surface=cs.background)
-        MarqueeTitle(state.project,style=MaterialTheme.typography.labelSmall,color=cs.onSurfaceVariant,surface=cs.background)
+        MarqueeTitle(projectSubtitle(state.project,state.hasProject,state.running),style=MaterialTheme.typography.labelSmall,color=cs.onSurfaceVariant,surface=cs.background)
     }}},navigationIcon={IconButton(onClick=actions.onBack){Icon(Icons.AutoMirrored.Outlined.ArrowBack,"Back to task history")}},
         actions={Box{
             IconButton(onClick={menu=true}){Icon(Icons.Outlined.MoreVert,"Task options")}
@@ -230,32 +267,40 @@ class WorkChatActions(val onSend:()->Unit={},val onStop:()->Unit={},val onBack:(
                 Spacer(Modifier.height(16.dp));Text("Inspect a project, make a change, or research an idea. You can keep refining it here.",style=MaterialTheme.typography.bodyLarge)
                 Spacer(Modifier.height(24.dp));TextButton(onClick=actions.onProject){Icon(Icons.Outlined.FolderOpen,null);Spacer(Modifier.width(8.dp));Text("Choose project")}
             }else ChatTimeline(ChatTimelineUiState(state.conversationId,state.messages),actions.onCopy,actions.onShare,
-                modifier=Modifier.widthIn(max=760.dp).fillMaxSize(),toolContent={message,position,count->
-                    state.steps.firstOrNull{it.id==message.id}?.let{step->WorkToolEntry(step,state.pendingId==step.id,position,count){allow->actions.onApprove(step.id,allow)}}
+                modifier=Modifier.widthIn(max=760.dp).fillMaxSize(),toolContent={message,_,_->
+                    state.steps.firstOrNull{it.id==message.id}?.let{step->WorkToolEntry(step,state.pendingId==step.id){allow->actions.onApprove(step.id,allow)}}
                 },trailingContent={
                     if(state.running&&state.pendingId==null)Row(Modifier.padding(vertical=12.dp),verticalAlignment=Alignment.CenterVertically) {
-                        CircularProgressIndicator(Modifier.size(16.dp),strokeWidth=2.dp);Spacer(Modifier.width(12.dp));ShimmerStatusText(if(state.status=="Thinking")"Thinking…"else "Working…")
+                        CircularProgressIndicator(Modifier.size(16.dp),strokeWidth=2.dp);Spacer(Modifier.width(12.dp));ShimmerStatusText(state.progress.ifBlank{if(state.status=="Thinking")"Thinking…"else "Working…"},style=MaterialTheme.typography.bodySmall,maxLines=2)
                     }else if(!state.running)Text("${state.status}\u2002•\u2002Performed ${state.steps.size} action${if(state.steps.size==1)""else "s"}",style=MaterialTheme.typography.labelMedium,color=cs.onSurfaceVariant,modifier=Modifier.padding(vertical=12.dp))
                 })
         }
     }
 }
 
-@Composable fun WorkToolEntry(step:WorkStep,needsApproval:Boolean,position:Int=0,count:Int=1,onApprove:(Boolean)->Unit) {
+@Composable fun WorkToolEntry(step:WorkStep,needsApproval:Boolean,onApprove:(Boolean)->Unit) {
     val cs=MaterialTheme.colorScheme
-    var expanded by rememberSaveable(step.id){mutableStateOf(false)}
+    var details by rememberSaveable(step.id){mutableStateOf(false)}
     val args=remember(step.arguments){runCatching{JSONObject(step.arguments)}.getOrDefault(JSONObject())}
     val title=remember(step.tool,step.arguments){toolLabel(step.tool,args)}
-    val icon=when(step.tool){"web_search","fetch_url"->Icons.Outlined.Public;"run_command","git_status","git_diff"->Icons.Outlined.Terminal;"find_files","search_files"->Icons.Outlined.Search;"write_file","append_file","replace_in_file"->Icons.Outlined.Edit;else->Icons.Outlined.Description}
-    Surface(color=cs.surfaceContainerHigh,shape=groupedRowShape(position,count),modifier=Modifier.fillMaxWidth().animateContentSize(spring(dampingRatio=1f,stiffness=600f)).testTag("work-tool-${step.id}")) {
-      Column(verticalArrangement=Arrangement.spacedBy(8.dp)) {
-        Surface(onClick={expanded=!expanded},color=cs.surfaceContainerHigh) {
-            ListItem(headlineContent={MarqueeTitle(title,surface=cs.surfaceContainerHigh,style=MaterialTheme.typography.bodyMedium)},
-                supportingContent={Text(if(needsApproval)"Needs your approval"else step.state,style=MaterialTheme.typography.labelSmall,color=if(step.state=="Failed")cs.error else cs.onSurfaceVariant)},
-                leadingContent={Icon(icon,null,tint=cs.primary)},trailingContent={if(step.state=="Running")CircularProgressIndicator(Modifier.size(18.dp),strokeWidth=2.dp)else Icon(if(expanded)Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore,null)},
-                colors=ListItemDefaults.colors(containerColor=cs.surfaceContainerHigh))
+    val icon=when(step.tool){"web_search","web_search_batch","fetch_url","find_in_page"->Icons.Outlined.Public;"ask_user"->Icons.Outlined.QuestionAnswer;in DeviceTools.names->Icons.Outlined.Smartphone;"run_command","git_status","git_diff"->Icons.Outlined.Terminal;"find_files","search_files"->Icons.Outlined.Search;"write_file","append_file","replace_in_file"->Icons.Outlined.Edit;else->Icons.Outlined.Description}
+    Column(Modifier.fillMaxWidth().testTag("work-tool-${step.id}")) {
+        Surface(onClick={details=true},color=cs.background,shape=MaterialTheme.shapes.extraSmall) {
+            Row(Modifier.fillMaxWidth().heightIn(min=48.dp),verticalAlignment=Alignment.CenterVertically,horizontalArrangement=Arrangement.spacedBy(8.dp)) {
+                if(step.state=="Running") {
+                    val pulse by rememberInfiniteTransition(label="Tool activity").animateFloat(.8f,1f,
+                        infiniteRepeatable(tween(700),RepeatMode.Reverse),label="Tool icon pulse")
+                    Icon(icon,null,Modifier.size(20.dp).graphicsLayer{scaleX=pulse;scaleY=pulse;alpha=pulse},tint=cs.primary)
+                    ShimmerStatusText(title,Modifier.weight(1f),style=MaterialTheme.typography.bodySmall,maxLines=1)
+                }else {
+                    Icon(icon,null,Modifier.size(20.dp),tint=if(step.state=="Failed")cs.error else cs.onSurfaceVariant)
+                    MarqueeTitle(title,Modifier.weight(1f),style=MaterialTheme.typography.bodySmall,surface=cs.background,
+                        color=if(step.state=="Failed")cs.error else cs.onSurfaceVariant)
+                }
+                Icon(Icons.Outlined.ExpandMore,"View tool details",Modifier.size(16.dp),tint=cs.onSurfaceVariant)
+            }
         }
-        if(needsApproval)Surface(color=cs.surfaceContainer,shape=MaterialTheme.shapes.large,modifier=Modifier.fillMaxWidth()) {
+        if(needsApproval)Surface(color=cs.surfaceContainer,shape=MaterialTheme.shapes.large,modifier=Modifier.fillMaxWidth().padding(bottom=8.dp)) {
             Column(Modifier.padding(16.dp),verticalArrangement=Arrangement.spacedBy(12.dp)) {
                 Row(verticalAlignment=Alignment.CenterVertically){Icon(Icons.Outlined.Shield,null,tint=cs.primary);Spacer(Modifier.width(8.dp));Text("Allow this action?",style=MaterialTheme.typography.titleSmall)}
                 WorkToolText(step.arguments.take(6000))
@@ -265,31 +310,56 @@ class WorkChatActions(val onSend:()->Unit={},val onStop:()->Unit={},val onBack:(
                     FilledTonalButton(onClick={onApprove(false)},shape=groupedRowShape(1,2),modifier=Modifier.fillMaxWidth().heightIn(min=48.dp)){Text("Decline")}
                 }
             }
-        }else if(expanded) {
-            val details=listOf("Arguments" to step.arguments.take(6000))+
-                if(step.output.isNotBlank())listOf("Result" to step.output)else emptyList()
-            Column(Modifier.fillMaxWidth().padding(horizontal=12.dp).padding(bottom=12.dp).testTag("work-tool-${step.id}-details"),verticalArrangement=Arrangement.spacedBy(4.dp)) {
-                details.forEachIndexed{index,(label,text)->
-                    Surface(color=cs.surfaceContainer,shape=groupedRowShape(index,details.size),modifier=Modifier.fillMaxWidth()) {
-                        Column(Modifier.padding(8.dp)) {
-                            Text(label,style=MaterialTheme.typography.labelMedium,color=cs.onSurfaceVariant,modifier=Modifier.padding(horizontal=8.dp,vertical=4.dp))
-                            WorkToolText(text)
-                        }
-                    }
-                }
+        }
+    }
+    if(details)HydraBottomSheet(onDismiss={details=false}){dismiss->
+        Column(Modifier.fillMaxWidth().padding(horizontal=16.dp).padding(bottom=24.dp).testTag("work-tool-${step.id}-details")) {
+            Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically) {
+                Text(title,style=MaterialTheme.typography.titleMedium,modifier=Modifier.weight(1f))
+                IconButton(onClick=dismiss){Icon(Icons.Outlined.Close,"Close tool details")}
+            }
+            Text(step.state,style=MaterialTheme.typography.labelMedium,color=if(step.state=="Failed")cs.error else cs.onSurfaceVariant)
+            Column(Modifier.heightIn(max=480.dp).verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(12.dp)) {
+                Text("Arguments",style=MaterialTheme.typography.titleSmall,modifier=Modifier.padding(top=16.dp))
+                WorkToolText(step.arguments)
+                if(step.output.isNotBlank()){Text("Result",style=MaterialTheme.typography.titleSmall);WorkToolText(step.output)}
             }
         }
     }
+}
+
+internal fun commandActivityLabel(command:String):String {
+    val commandName=command.trim().substringBefore(' ').substringAfterLast('/').lowercase()
+    return when {
+        command.trim().startsWith("git status")->"Check Git status"
+        command.trim().startsWith("git diff")->"Review project changes"
+        commandName=="git"->"Work with the repository"
+        commandName in setOf("gradle","gradlew","gradlew.bat")->"Build and check the project"
+        commandName in setOf("ls","find","pwd","tree")->"Explore project files"
+        commandName in setOf("rg","grep")->"Search the project"
+        commandName in setOf("cat","head","tail","sed")->"Inspect project content"
+        commandName in setOf("pytest","jest")||command.contains(" test")->"Run project checks"
+        else->"Run a project command"
     }
 }
 
-private fun toolLabel(name:String,args:JSONObject):String {
-    val path=args.optString("path")
+internal fun toolLabel(name:String,args:JSONObject):String {
+    val path=args.optString("path").substringAfterLast('/')
     return when(name) {
+        "ask_user"->"Ask a few questions"
+        "web_search_batch"->"Research the web"
+        "find_in_page"->"Find relevant passages"
+        "get_time"->"Check the current time"
+        "wait_for","wait_until"->"Wait before continuing"
+        "schedule_task"->"Schedule a follow-up"
+        "list_scheduled_tasks"->"Check scheduled tasks"
+        "update_scheduled_task"->"Update a schedule"
+        "cancel_scheduled_task"->"Cancel a schedule"
+        in DeviceTools.names->name.replace('_',' ').replaceFirstChar{it.uppercase()}
         "list_files"->"List ${path.ifBlank{"project files"}}"
         "read_file"->"Read $path"
         "write_file"->"Write $path"
-        "run_command"->args.optString("command").ifBlank{"Run command"}
+        "run_command"->commandActivityLabel(args.optString("command"))
         "search_files"->"Search project: ${args.optString("query")}"
         "find_files"->"Find ${args.optString("pattern")}"
         "file_info"->"Inspect $path"
@@ -307,7 +377,7 @@ private fun toolLabel(name:String,args:JSONObject):String {
     }
 }
 
-@Composable private fun WorkToolText(text:String){SelectionContainer{Text(text,style=MaterialTheme.typography.bodySmall,
+@Composable private fun WorkToolText(text:String){SelectionContainer{Text(text,style=MaterialTheme.typography.code,
     modifier=Modifier.fillMaxWidth().heightIn(max=240.dp).verticalScroll(rememberScrollState()).horizontalScroll(rememberScrollState()).padding(8.dp),softWrap=false)}}
 @Composable private fun WorkError(text:String,onDismiss:()->Unit){Surface(color=MaterialTheme.colorScheme.errorContainer,shape=MaterialTheme.shapes.large){Row(Modifier.padding(start=16.dp),verticalAlignment=Alignment.CenterVertically){Text(text,Modifier.weight(1f),color=MaterialTheme.colorScheme.onErrorContainer,style=MaterialTheme.typography.bodyMedium);IconButton(onClick=onDismiss){Icon(Icons.Outlined.Close,"Dismiss error")}}}}
 

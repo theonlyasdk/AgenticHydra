@@ -179,7 +179,7 @@ class MainActivity : ComponentActivity() {
                     Row(Modifier.fillMaxWidth().padding(horizontal=12.dp,vertical=8.dp),verticalAlignment=Alignment.CenterVertically) {
                         IconButton(onClick={scope.launch { drawer.open() }}) { Icon(Icons.Outlined.Menu,"Open chat history") }
                         Spacer(Modifier.width(8.dp))
-                        Text("hydra",fontFamily=InstrumentSans,fontWeight=FontWeight.SemiBold,fontSize=25.sp,letterSpacing=(-1).sp)
+                        Text("hydra",style=MaterialTheme.typography.hydraTitle)
                         Spacer(Modifier.weight(1f))
                         IconButton(onClick={vm.newChat();draft=""}) { Icon(Icons.Outlined.Edit,"Start a new chat") }
                     }

@@ -15,6 +15,8 @@ class WorkActivityUiTest:AppUiTestBase() {
         val intent=Intent(controller.get(),WorkChatActivity::class.java).putExtra("newConversation",true)
         val task=Robolectric.buildActivity(WorkChatActivity::class.java,intent).setup()
         try {
+            compose.waitForIdle()
+            assertEquals(Intent.ACTION_OPEN_DOCUMENT_TREE,org.robolectric.Shadows.shadowOf(task.get()).nextStartedActivityForResult.intent.action)
             compose.onNodeWithText("What are we working on?").assertIsDisplayed()
             compose.onNodeWithText("Reply to Hydra").assertIsDisplayed()
             compose.onNodeWithContentDescription("Add attachment or change directory").performClick()

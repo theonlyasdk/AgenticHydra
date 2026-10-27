@@ -142,7 +142,11 @@ class WorkHistoryUiTest : AppUiTestBase() {
         val chat = (activity.application as HydraApplication).models[HydraModel::class.java]
         activity.setContent { HydraTheme { WorkScreen(chat,work) } }
         compose.onNodeWithText("Inspect project").assertIsDisplayed()
-        compose.onNodeWithContentDescription("Delete task history").performClick()
+        compose.onNodeWithContentDescription("Task options").performClick()
+        compose.onNodeWithText("Export conversation").assertIsDisplayed()
+        screenshot("work-history-options")
+        compose.onNodeWithText("Delete").performClick()
+        compose.mainClock.advanceTimeBy(500)
         compose.onNodeWithText("Delete").performClick()
         compose.onNodeWithText("No tasks yet").assertIsDisplayed()
         org.junit.Assert.assertTrue(work.records.isEmpty())

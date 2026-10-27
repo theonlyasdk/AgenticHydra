@@ -63,7 +63,11 @@ class ProjectTools(private val context:Context,private val root:DocumentFile) {
     fun execute(name:String,args:JSONObject):WorkToolResult {
         val path=args.optString("path","")
         return when(name) {
-            "list_files"->{val file=resolve(path);require(file.isDirectory){"Choose a directory."};WorkToolResult(file.listFiles().take(150).joinToString("\n"){(if(it.isDirectory)"dir  "else "file ")+(it.name?:"?")}.ifBlank{"Directory is empty."})}
+            "list_files"->{
+                val file=resolve(path);require(file.isDirectory){"Choose a directory."}
+                val entries=file.listFiles().sortedWith(compareBy<DocumentFile>{!it.isDirectory}.thenBy{it.name}).take(150)
+                WorkToolResult(formatProjectListing(entries.map{(it.name?:"?") to it.isDirectory}))
+            }
             "read_file"->WorkToolResult(read(args.getString("path")))
             "write_file"->{val change=write(args.getString("path"),args.getString("content"));WorkToolResult("Wrote ${change.path} (${change.after.length} characters).",listOf(change))}
             "append_file"->{val before=if(runCatching{resolve(path)}.isSuccess)read(path)else "";val change=write(path,before+args.getString("content"));WorkToolResult("Appended to $path.",listOf(change))}
@@ -114,4 +118,13 @@ class ProjectTools(private val context:Context,private val root:DocumentFile) {
             else->error("Unknown project tool: $name")
         }
     }
+}
+
+/** ls -F style names, sorted directories first, arranged in readable monospace columns. */
+internal fun formatProjectListing(entries:List<Pair<String,Boolean>>):String {
+    if(entries.isEmpty())return "Directory is empty."
+    val names=entries.map{(name,directory)->name.replace("\n","\\n").replace("\r","\\r")+if(directory)"/"else ""}
+    val width=names.maxOf{it.length}+2
+    val columns=(72/width).coerceIn(1,4)
+    return names.chunked(columns).joinToString("\n"){row->row.mapIndexed{index,name->if(index==row.lastIndex)name else name.padEnd(width)}.joinToString("")}
 }

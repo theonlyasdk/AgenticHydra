@@ -124,7 +124,7 @@ private data class TailLayout(
             contentPadding = PaddingValues(horizontal = 24.dp, vertical = 16.dp)) {
             itemsIndexed(state.messages, key = { _, message -> message.id }) { index, message ->
                 val adjacentTool=message.role=="tool"&&state.messages.getOrNull(index+1)?.role=="tool"
-                Column(Modifier.fillMaxWidth().padding(bottom=if(adjacentTool)4.dp else if(index<state.messages.lastIndex)24.dp else 0.dp)) {
+                Column(Modifier.fillMaxWidth().padding(bottom=if(adjacentTool)0.dp else if(index<state.messages.lastIndex)24.dp else 0.dp)) {
                     if (message.id in timeMarkers) {
                         ChatTimeDivider(message.createdAt)
                         Spacer(Modifier.height(16.dp))
@@ -258,8 +258,8 @@ private data class TailLayout(
         if(clock.isNotBlank())add(clock)
     }
     Row(Modifier.fillMaxWidth().padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-        IconButton(onClick = onCopy) { Icon(Icons.Outlined.ContentCopy, "Copy response", Modifier.size(18.dp), tint = cs.onSurfaceVariant) }
-        IconButton(onClick = onShare) { Icon(Icons.Outlined.Share, "Share response", Modifier.size(18.dp), tint = cs.onSurfaceVariant) }
+        IconButton(onClick = onCopy,modifier=Modifier.size(48.dp)) { Box(Modifier.fillMaxSize(),contentAlignment=Alignment.CenterStart){Icon(Icons.Outlined.ContentCopy, "Copy response", Modifier.size(18.dp), tint = cs.onSurfaceVariant)} }
+        IconButton(onClick = onShare,modifier=Modifier.size(48.dp)) { Box(Modifier.fillMaxSize(),contentAlignment=Alignment.CenterStart){Icon(Icons.Outlined.Share, "Share response", Modifier.size(18.dp), tint = cs.onSurfaceVariant)} }
         if(parts.isNotEmpty())Text(parts.joinToString("\u2002•\u2002"),maxLines=1,softWrap=false,overflow=TextOverflow.Ellipsis,
             style=MaterialTheme.typography.labelMedium,color=cs.onSurfaceVariant,
             modifier=Modifier.weight(1f).padding(start=8.dp).semantics {

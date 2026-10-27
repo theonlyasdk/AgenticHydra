@@ -14,18 +14,19 @@ internal fun isCancellationNotice(text:String):Boolean {
 enum class ApprovalMode(val title:String,val detail:String) {
     EVERY("Ask every time","Approve file reads, changes, commands, and web access."),
     CHANGES("Ask for changes","Read and search freely; approve changes and every shell command."),
-    SESSION("Allow next task","Allow all tools for the next turn; reset afterward.")
+    SESSION("Allow next task","Allow all tools for the next turn; reset afterward."),
+    FULL("Full access","Allow tools, file changes, and commands without asking. Stays enabled until changed.")
 }
 
 object ToolPolicy {
-    private val readTools=setOf("list_files","read_file","search_files","find_files","file_info","web_search","fetch_url")
+    private val readTools=setOf("list_files","read_file","search_files","find_files","file_info","web_search","web_search_batch","fetch_url","find_in_page","get_time","wait_for","wait_until","list_scheduled_tasks")+DeviceTools.readOnly
     fun parts(path:String):List<String> {
         require(!path.startsWith('/')&&!path.contains('\\')){"Use a relative project path."}
         val parts=path.split('/').filter{it.isNotEmpty()&&it!="."}
         require(parts.none{it==".."||it.contains('\u0000')}){"Paths must stay inside the selected project."}
         return parts
     }
-    fun approval(mode:ApprovalMode,tool:String)=mode==ApprovalMode.EVERY||(mode==ApprovalMode.CHANGES&&tool !in readTools)
+    fun approval(mode:ApprovalMode,tool:String)=tool!="ask_user"&&(mode==ApprovalMode.EVERY||(mode==ApprovalMode.CHANGES&&tool !in readTools))
 }
 
 data class WorkStep(val tool:String,val arguments:String,val state:String="Waiting",val output:String="",

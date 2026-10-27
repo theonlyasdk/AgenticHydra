@@ -47,8 +47,8 @@ class WorkHarnessTest {
         assertEquals(4,repaired.length())
         assertEquals("b",repaired.getJSONObject(3).getString("tool_call_id"))
         assertEquals(repaired.toString(),repairedWorkHistory(repaired.toString()).toString())
-        assertEquals(17,WorkTools.schema().length())
-        assertEquals(17,WorkTools.names.distinct().size)
+        assertEquals(48,WorkTools.schema().length())
+        assertEquals(48,WorkTools.names.distinct().size)
         listOf("append_file","replace_in_file","delete_file","move_file","copy_file","create_directory","git_status","git_diff").forEach{assertTrue(ToolPolicy.approval(ApprovalMode.CHANGES,it))}
     }
 

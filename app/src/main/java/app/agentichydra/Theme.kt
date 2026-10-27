@@ -39,6 +39,7 @@ data class AppearanceUiState(val themeMode:AppThemeMode=AppThemeMode.SYSTEM,val 
 val InstrumentSans = FontFamily(Font(R.font.instrument_sans))
 val InstrumentSerif = FontFamily(Font(R.font.instrument_serif))
 val Typography.code:TextStyle get()=bodyMedium.copy(fontFamily=FontFamily.Monospace)
+val Typography.hydraTitle:TextStyle get()=titleLarge.copy(fontFamily=InstrumentSans,fontWeight=FontWeight.SemiBold,fontSize=25.sp,letterSpacing=(-1).sp)
 val Typography.markdownHeadings:List<TextStyle> get()=listOf(headlineMedium,
     titleLarge.copy(fontWeight=FontWeight.SemiBold),titleMedium.copy(fontWeight=FontWeight.SemiBold),
     bodyLarge.copy(fontWeight=FontWeight.SemiBold),bodyMedium.copy(fontWeight=FontWeight.SemiBold),labelMedium.copy(fontWeight=FontWeight.SemiBold))
@@ -88,6 +89,16 @@ private val OrbitDark = Dark.copy(secondary=Color(0xFFA8C8FF),secondaryContainer
         secondary=accents.secondary,secondaryContainer=accents.secondaryContainer,
         tertiary=accents.tertiary,tertiaryContainer=accents.tertiaryContainer) else scheme
     MaterialTheme(colorScheme=orbitScheme,typography=MaterialTheme.typography,shapes=MaterialTheme.shapes,content=content)
+}
+
+/** A semantic warning palette, independent of the user's dynamic accent color. */
+@Composable internal fun HydraWarningTheme(content:@Composable ()->Unit) {
+    val cs=MaterialTheme.colorScheme
+    val dark=cs.background.luminance()<.5f
+    MaterialTheme(colorScheme=cs.copy(tertiary=if(dark)Color(0xFFFFB77D)else Color(0xFF854500),
+        tertiaryContainer=if(dark)Color(0xFF653400)else Color(0xFFFFDCC2),
+        onTertiaryContainer=if(dark)Color(0xFFFFDCC2)else Color(0xFF2D1600)),
+        typography=MaterialTheme.typography,shapes=MaterialTheme.shapes,content=content)
 }
 
 @Composable fun HydraTheme(darkTheme: Boolean? = null, dynamicColor: Boolean? = null, content: @Composable () -> Unit) {

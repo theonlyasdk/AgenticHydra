@@ -11,18 +11,15 @@
         <item name="postSplashScreenTheme">@style/AppTheme</item>
         <item name="android:colorAccent">@color/hydra_icon_foreground</item>
         <item name="android:windowLightStatusBar">@bool/hydra_light_system_bars</item>
-        <item name="android:windowLightNavigationBar">@bool/hydra_light_system_bars</item>
     </style>
     <style name="HydraStartingLight" parent="HydraStarting">
         <item name="windowSplashScreenBackground">@color/hydra_icon_background_light</item>
         <item name="android:colorAccent">@color/hydra_icon_foreground_light</item>
         <item name="android:windowLightStatusBar">true</item>
-        <item name="android:windowLightNavigationBar">true</item>
     </style>
     <style name="HydraStartingDark" parent="HydraStarting">
         <item name="windowSplashScreenBackground">@color/hydra_icon_background_dark</item>
         <item name="android:colorAccent">@color/hydra_icon_foreground_dark</item>
         <item name="android:windowLightStatusBar">false</item>
-        <item name="android:windowLightNavigationBar">false</item>
     </style>
 </resources>

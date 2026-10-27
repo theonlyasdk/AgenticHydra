@@ -5,7 +5,7 @@ import org.json.JSONObject
 
 object WorkTools {
     val names=listOf("list_files","read_file","write_file","run_command","search_files","find_files","file_info",
-        "create_directory","append_file","replace_in_file","delete_file","move_file","copy_file","web_search","fetch_url","git_status","git_diff")
+        "create_directory","append_file","replace_in_file","delete_file","move_file","copy_file","web_search","fetch_url","git_status","git_diff","web_search_batch","find_in_page","ask_user")+DeviceTools.names+ScheduleTools.names
     fun schema():JSONArray {
         fun str(description:String)=JSONObject().put("type","string").put("description",description)
         fun bool(description:String)=JSONObject().put("type","boolean").put("description",description)
@@ -27,9 +27,17 @@ object WorkTools {
             .put(tool("delete_file","Delete one project file, never a directory. Only use when explicitly requested by the user.",listOf("path"),path))
             .put(tool("move_file","Move or rename a UTF-8 project file. Destination must not exist. Maximum 256 KB.",listOf("source","destination"),"source" to str("Existing relative file path."),"destination" to str("New relative file path.")))
             .put(tool("copy_file","Copy a UTF-8 project file. Destination must not exist. Maximum 256 KB.",listOf("source","destination"),"source" to str("Existing relative file path."),"destination" to str("New relative file path.")))
-            .put(tool("web_search","Search the public web for a query; returns result titles, URLs, and snippets. Search sites may rate-limit or block access; report failures honestly.",listOf("query"),"query" to str("Search query, maximum 300 characters.")))
-            .put(tool("fetch_url","Read a public HTTPS page as text with source links. No credentials, private addresses, scripts, or downloads; maximum response 1 MB.",listOf("url"),"url" to str("Public HTTPS URL.")))
+            .put(tool("web_search","Search public sources with deduplicated titles, URLs, snippets, and source IDs. Supports domain filters, result limits, best-effort freshness, and a five-minute cache. Results may be blocked or rate-limited.",listOf("query"),"query" to str("Search query, maximum 300 characters."),*searchFilterSchema()))
+            .put(tool("fetch_url","Read a public HTTPS page with source links and text pagination. Use next_offset to continue reading. No credentials, private addresses, scripts, or binary downloads; maximum download 1 MB. Parsed pages are cached five minutes.",listOf("url"),"url" to str("Public HTTPS URL."),"max_chars" to integerSchema("Text budget, default 10,000 characters.",1000,12000),"offset" to integerSchema("Text offset, default zero.",0,120000)))
             .put(tool("git_status","Run git status --short --branch in Termux for the selected project. Always asks in Ask for changes mode.",emptyList()))
             .put(tool("git_diff","Read the project's Git diff in Termux without external diff programs. Always asks in Ask for changes mode.",emptyList(),"path" to str("Optional relative path to restrict the diff."),"staged" to bool("Show staged changes; default false.")))
+            .put(tool("web_search_batch","Run one to three independent searches, with at most two requests in parallel. Returns separate structured results and errors per query. Prefer over repeated sequential searches.",listOf("queries"),
+                "queries" to JSONObject().put("type","array").put("minItems",1).put("maxItems",3).put("items",str("Distinct search query, maximum 300 characters.")),*searchFilterSchema()))
+            .put(tool("find_in_page","Find literal text in a public HTTPS page, returning line numbers and short contextual excerpts. Reuses cached page text; efficient for locating relevant passages.",listOf("url","query"),
+                "url" to str("Public HTTPS URL."),"query" to str("Text to find, 1–200 characters."),"max_matches" to integerSchema("Maximum matches, default six.",1,10)))
+            .put(QuestionTool.schema())
+            .apply{DeviceTools.schema().forEach{put(it)}}
+            .apply{ScheduleTools.schema().forEach{put(it)}}
+
     }
 }

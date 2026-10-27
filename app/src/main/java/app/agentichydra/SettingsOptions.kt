@@ -44,19 +44,23 @@ import androidx.compose.ui.unit.dp
 data class ToolApprovalsUiState(val selected:ApprovalMode,val enabled:Boolean=true)
 
 @Composable fun ToolApprovalOptions(state:ToolApprovalsUiState,onSelect:(ApprovalMode)->Unit) {
-    val cs=MaterialTheme.colorScheme
     Column(Modifier.fillMaxWidth(),verticalArrangement=Arrangement.spacedBy(4.dp)) {
         ApprovalMode.entries.forEachIndexed { index,mode ->
-            val selected=state.selected==mode
-            val color=if(selected)cs.primaryContainer else cs.surfaceContainerHigh
-            Surface(onClick={onSelect(mode)},enabled=state.enabled,color=color,shape=groupedRowShape(index,ApprovalMode.entries.size),
-                modifier=Modifier.fillMaxWidth().semantics{this.selected=selected}) {
-                ListItem(headlineContent={Text(mode.title)},supportingContent={Text(mode.detail)},
-                    leadingContent={Icon(if(mode==ApprovalMode.SESSION)Icons.Outlined.Bolt else Icons.Outlined.Shield,null,tint=cs.primary)},
-                    trailingContent={if(selected)Icon(Icons.Outlined.Check,"Selected",tint=cs.onPrimaryContainer)},
-                    colors=ListItemDefaults.colors(containerColor=color,headlineColor=if(selected)cs.onPrimaryContainer else cs.onSurface,
-                        supportingColor=if(selected)cs.onPrimaryContainer else cs.onSurfaceVariant))
+            val content:@Composable ()->Unit={
+                val cs=MaterialTheme.colorScheme
+                val selected=state.selected==mode
+                val warning=mode==ApprovalMode.FULL
+                val color=if(warning)cs.tertiaryContainer else if(selected)cs.primaryContainer else cs.surfaceContainerHigh
+                val foreground=if(warning)cs.onTertiaryContainer else if(selected)cs.onPrimaryContainer else cs.onSurface
+                Surface(onClick={onSelect(mode)},enabled=state.enabled,color=color,shape=groupedRowShape(index,ApprovalMode.entries.size),
+                    modifier=Modifier.fillMaxWidth().semantics{this.selected=selected}) {
+                    ListItem(headlineContent={Text(mode.title)},supportingContent={Text(mode.detail)},
+                        leadingContent={Icon(if(warning)Icons.Outlined.WarningAmber else if(mode==ApprovalMode.SESSION)Icons.Outlined.Bolt else Icons.Outlined.Shield,null,tint=if(warning)cs.tertiary else cs.primary)},
+                        trailingContent={if(selected)Icon(Icons.Outlined.Check,"Selected",tint=foreground)},
+                        colors=ListItemDefaults.colors(containerColor=color,headlineColor=foreground,supportingColor=if(warning||selected)foreground else cs.onSurfaceVariant))
+                }
             }
+            if(mode==ApprovalMode.FULL)HydraWarningTheme(content)else content()
         }
     }
 }
