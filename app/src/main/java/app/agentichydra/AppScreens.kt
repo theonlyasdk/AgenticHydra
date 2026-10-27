@@ -54,7 +54,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
     var confirm by remember{mutableStateOf<ApprovalMode?>(null)}
     HydraBottomSheet(onDismiss=onDismiss,containerColor=cs.surfaceContainer){dismiss->
         Column(Modifier.fillMaxWidth().padding(horizontal=16.dp).padding(bottom=24.dp),verticalArrangement=Arrangement.spacedBy(16.dp)){
-            Text("Tool approvals",style=MaterialTheme.typography.titleLarge)
+            Row(verticalAlignment=Alignment.CenterVertically){Icon(Icons.Outlined.Shield,null,tint=cs.primary);Spacer(Modifier.width(12.dp));Text("Tool approvals",style=MaterialTheme.typography.titleLarge)}
             ToolApprovalOptions(ToolApprovalsUiState(work.mode,!work.running)){mode->
                 if(mode in setOf(ApprovalMode.SESSION,ApprovalMode.FULL))confirm=mode else{work.mode=mode;dismiss()}
             }
@@ -82,9 +82,9 @@ import androidx.lifecycle.viewmodel.compose.viewModel
     fun page(name:String){context.startActivity(Intent(context,SettingsActivity::class.java).putExtra("page",name))}
     Scaffold(containerColor=cs.background,topBar={TopAppBar(title={Text("User",style=MaterialTheme.typography.titleLarge)},colors=TopAppBarDefaults.topAppBarColors(containerColor=cs.background))}){padding->
         LazyColumn(Modifier.fillMaxSize().padding(padding).widthIn(max=840.dp),contentPadding=PaddingValues(16.dp),verticalArrangement=Arrangement.spacedBy(24.dp)){
-            item{Row(Modifier.padding(vertical=12.dp),verticalAlignment=Alignment.CenterVertically){HydraIllustration(Modifier.size(88.dp));Spacer(Modifier.width(12.dp));Text("Agentic Hydra",style=MaterialTheme.typography.hydraTitle)}}
+            item{Row(Modifier.fillMaxWidth().padding(vertical=12.dp),verticalAlignment=Alignment.CenterVertically,horizontalArrangement=Arrangement.Center){HydraIllustration(Modifier.size(88.dp));Spacer(Modifier.width(12.dp));Text("Agentic Hydra",style=MaterialTheme.typography.hydraTitle)}}
             item{SettingsGroup {
-                SettingsEntry(Icons.Outlined.Hub,"Connections",chat.provider.label){connections=true}
+                SettingsEntry(Icons.Outlined.Hub,"Connections",Provider.entries.filter{!it.keyRequired||chat.savedKey(it).isNotBlank()}.map{it.label}.ifEmpty{listOf("None")}.joinToString(", ")){connections=true}
                 GroupDivider()
                 SettingsEntry(Icons.Outlined.Terminal,"Termux",if(allowed)"Connected"else "Set up"){page("termux")}
                 GroupDivider()
@@ -105,7 +105,8 @@ import androidx.lifecycle.viewmodel.compose.viewModel
             Row(verticalAlignment=Alignment.CenterVertically){Icon(Icons.Outlined.Contrast,null,tint=cs.primary);Spacer(Modifier.width(12.dp));Text("Appearance",style=MaterialTheme.typography.titleLarge)}
             AppearanceOptions(appearanceState,Build.VERSION.SDK_INT>=31,
                 onThemeChange={prefs.edit().putString("mode",it.name).apply()},
-                onDynamicColorChange={prefs.edit().putBoolean("dynamic",it).apply()})
+                onDynamicColorChange={prefs.edit().putBoolean("dynamic",it).apply()},
+                onMarqueeChange={prefs.edit().putBoolean("marquee",it).apply()})
         }
     }
     if(connections)ConnectionSheet(chat){connections=false}

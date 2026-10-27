@@ -15,9 +15,9 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 
-@Composable fun AppearanceOptions(state:AppearanceUiState,supportsDynamicColor:Boolean,onThemeChange:(AppThemeMode)->Unit,onDynamicColorChange:(Boolean)->Unit) {
+@Composable fun AppearanceOptions(state:AppearanceUiState,supportsDynamicColor:Boolean,onThemeChange:(AppThemeMode)->Unit,onDynamicColorChange:(Boolean)->Unit,onMarqueeChange:(Boolean)->Unit) {
     val cs=MaterialTheme.colorScheme
-    val count=AppThemeMode.entries.size+1
+    val count=AppThemeMode.entries.size+2
     Column(Modifier.fillMaxWidth().selectableGroup(),verticalArrangement=Arrangement.spacedBy(4.dp)) {
         AppThemeMode.entries.forEachIndexed { index,mode ->
             val selected=state.themeMode==mode
@@ -32,10 +32,16 @@ import androidx.compose.ui.unit.dp
                         supportingColor=if(selected)cs.onPrimaryContainer else cs.onSurfaceVariant))
             }
         }
-        Surface(color=cs.surfaceContainerHigh,shape=groupedRowShape(count-1,count)) {
+        Surface(color=cs.surfaceContainerHigh,shape=groupedRowShape(count-2,count)) {
             ListItem(headlineContent={Text("Device colors")},supportingContent={Text("Use Android’s wallpaper palette")},
                 leadingContent={Icon(Icons.Outlined.Palette,null,tint=cs.primary)},
                 trailingContent={Switch(checked=state.dynamicColor,onCheckedChange=onDynamicColorChange,enabled=supportsDynamicColor)},
+                colors=ListItemDefaults.colors(containerColor=cs.surfaceContainerHigh))
+        }
+        Surface(color=cs.surfaceContainerHigh,shape=groupedRowShape(count-1,count)) {
+            ListItem(headlineContent={Text("Scroll long text")},supportingContent={Text("Animate titles that overflow")},
+                leadingContent={Icon(Icons.Outlined.SwapHoriz,null,tint=cs.primary)},
+                trailingContent={Switch(checked=state.marquee,onCheckedChange=onMarqueeChange)},
                 colors=ListItemDefaults.colors(containerColor=cs.surfaceContainerHigh))
         }
     }
@@ -68,7 +74,7 @@ data class ToolApprovalsUiState(val selected:ApprovalMode,val enabled:Boolean=tr
 @Preview(name="Appearance light")
 @Preview(name="Appearance dark",uiMode=Configuration.UI_MODE_NIGHT_YES)
 @Preview(name="Appearance large text",fontScale=1.5f)
-@Composable private fun AppearanceOptionsPreview(){HydraTheme{AppearanceOptions(AppearanceUiState(AppThemeMode.SYSTEM),true,{},{})}}
+@Composable private fun AppearanceOptionsPreview(){HydraTheme{AppearanceOptions(AppearanceUiState(AppThemeMode.SYSTEM),true,{},{},{})}}
 
 @Preview(name="Approvals light")
 @Preview(name="Approvals dark",uiMode=Configuration.UI_MODE_NIGHT_YES)

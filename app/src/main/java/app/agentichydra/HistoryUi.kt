@@ -70,11 +70,13 @@ data class ConversationRowUiState(val title: String, val selected: Boolean)
     style: TextStyle = MaterialTheme.typography.bodyLarge, color: Color = LocalContentColor.current,
     textAlign: TextAlign = TextAlign.Start) {
     val scroll=rememberScrollState()
+    val marquee=LocalMarqueeEnabled.current
     val density=LocalDensity.current.density
     val direction=LocalLayoutDirection.current
     val distance=scroll.maxValue
-    LaunchedEffect(title,style,distance,density) {
+    LaunchedEffect(title,style,distance,density,marquee) {
         scroll.scrollTo(0)
+        if(!marquee)return@LaunchedEffect
         if(distance<=0||distance==Int.MAX_VALUE||coroutineContext[MotionDurationScale]?.scaleFactor==0f)return@LaunchedEffect
         val duration=ceil(distance/density/30f*1000).toInt().coerceAtLeast(1)
         repeat(3) {

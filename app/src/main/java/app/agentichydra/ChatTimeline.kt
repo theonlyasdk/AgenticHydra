@@ -76,6 +76,7 @@ private data class TailLayout(
     val dragging by listState.interactionSource.collectIsDraggedAsState()
     val scope = rememberCoroutineScope()
     val atBottom by remember(listState) { derivedStateOf { !listState.canScrollForward } }
+    val atTop by remember(listState) { derivedStateOf { !listState.canScrollBackward } }
     val timeMarkers=remember(state.messages){chatTimeMarkerIds(state.messages)}
     val latestUserId=state.messages.lastOrNull{it.role=="user"}?.id
     var observedUserId by remember(state.conversationId){mutableStateOf(latestUserId)}
@@ -147,10 +148,16 @@ private data class TailLayout(
         }
         val background=MaterialTheme.colorScheme.background
         // Draw above the scrolling content, including hosted Markdown views, below the controls.
-        Box(Modifier.align(Alignment.TopCenter).fillMaxWidth().height(32.dp)
-            .background(Brush.verticalGradient(listOf(background,Color.Transparent))))
-        Box(Modifier.align(Alignment.BottomCenter).fillMaxWidth().height(32.dp)
-            .background(Brush.verticalGradient(listOf(Color.Transparent,background))))
+        AnimatedVisibility(visible=!atTop,enter=fadeIn(),exit=fadeOut(),
+            modifier=Modifier.align(Alignment.TopCenter).fillMaxWidth()) {
+            Box(Modifier.fillMaxWidth().height(32.dp)
+                .background(Brush.verticalGradient(listOf(background,Color.Transparent))))
+        }
+        AnimatedVisibility(visible=!atBottom,enter=fadeIn(),exit=fadeOut(),
+            modifier=Modifier.align(Alignment.BottomCenter).fillMaxWidth()) {
+            Box(Modifier.fillMaxWidth().height(32.dp)
+                .background(Brush.verticalGradient(listOf(Color.Transparent,background))))
+        }
         AnimatedVisibility(visible=!following&&!atBottom,
             enter=scaleIn(spring(stiffness=650f),initialScale=.65f)+fadeIn(spring(stiffness=650f)),
             exit=scaleOut(spring(stiffness=850f),targetScale=.65f)+fadeOut(spring(stiffness=850f)),

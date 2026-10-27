@@ -20,13 +20,17 @@ import android.content.Context
 import android.content.SharedPreferences
 
 enum class AppThemeMode(val label:String) { SYSTEM("System"), LIGHT("Light"), DARK("Dark") }
-data class AppearanceUiState(val themeMode:AppThemeMode=AppThemeMode.SYSTEM,val dynamicColor:Boolean=false)
+data class AppearanceUiState(val themeMode:AppThemeMode=AppThemeMode.SYSTEM,val dynamicColor:Boolean=false,val marquee:Boolean=true)
+
+/** True when overflowing titles may auto-scroll; provided by [HydraTheme]. */
+val LocalMarqueeEnabled = staticCompositionLocalOf { true }
 
 @Composable fun rememberAppearanceState(): AppearanceUiState {
     val prefs=LocalContext.current.getSharedPreferences("appearance",Context.MODE_PRIVATE)
     fun read()=AppearanceUiState(
         runCatching{AppThemeMode.valueOf(prefs.getString("mode","SYSTEM")?:"SYSTEM")}.getOrDefault(AppThemeMode.SYSTEM),
-        prefs.getBoolean("dynamic",false))
+        prefs.getBoolean("dynamic",false),
+        prefs.getBoolean("marquee",true))
     var state by remember(prefs) { mutableStateOf(read()) }
     DisposableEffect(prefs){
         val listener=SharedPreferences.OnSharedPreferenceChangeListener{_,_->state=read()}
@@ -117,16 +121,18 @@ private val OrbitDark = Dark.copy(secondary=Color(0xFFA8C8FF),secondaryContainer
             }
         }
     }
-    MaterialTheme(colorScheme = scheme,
-        typography = Typography(
-            displaySmall = TextStyle(fontFamily = InstrumentSerif, fontSize = 42.sp, lineHeight = 46.sp),
-            headlineMedium = TextStyle(fontFamily = InstrumentSerif, fontSize = 32.sp, lineHeight = 38.sp),
-            titleLarge = TextStyle(fontFamily = InstrumentSans, fontSize = 22.sp, lineHeight = 28.sp),
-            titleMedium = TextStyle(fontFamily = InstrumentSans, fontSize = 16.sp, lineHeight = 24.sp),
-            bodyLarge = TextStyle(fontFamily = InstrumentSans, fontSize = 16.sp, lineHeight = 25.sp),
-            bodyMedium = TextStyle(fontFamily = InstrumentSans, fontSize = 14.sp, lineHeight = 21.sp),
-            labelLarge = TextStyle(fontFamily = InstrumentSans, fontSize = 14.sp, lineHeight = 20.sp),
-            labelMedium = TextStyle(fontFamily = InstrumentSans, fontSize = 12.sp, lineHeight = 16.sp),
-            labelSmall = TextStyle(fontFamily = InstrumentSans, fontSize = 11.sp, lineHeight = 16.sp)
-        ), content = content)
+    CompositionLocalProvider(LocalMarqueeEnabled provides appearance.marquee) {
+        MaterialTheme(colorScheme = scheme,
+            typography = Typography(
+                displaySmall = TextStyle(fontFamily = InstrumentSerif, fontSize = 42.sp, lineHeight = 46.sp),
+                headlineMedium = TextStyle(fontFamily = InstrumentSerif, fontSize = 32.sp, lineHeight = 38.sp),
+                titleLarge = TextStyle(fontFamily = InstrumentSans, fontSize = 22.sp, lineHeight = 28.sp),
+                titleMedium = TextStyle(fontFamily = InstrumentSans, fontSize = 16.sp, lineHeight = 24.sp),
+                bodyLarge = TextStyle(fontFamily = InstrumentSans, fontSize = 16.sp, lineHeight = 25.sp),
+                bodyMedium = TextStyle(fontFamily = InstrumentSans, fontSize = 14.sp, lineHeight = 21.sp),
+                labelLarge = TextStyle(fontFamily = InstrumentSans, fontSize = 14.sp, lineHeight = 20.sp),
+                labelMedium = TextStyle(fontFamily = InstrumentSans, fontSize = 12.sp, lineHeight = 16.sp),
+                labelSmall = TextStyle(fontFamily = InstrumentSans, fontSize = 11.sp, lineHeight = 16.sp)
+            ), content = content)
+    }
 }

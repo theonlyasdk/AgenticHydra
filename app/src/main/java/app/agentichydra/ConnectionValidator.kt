@@ -24,8 +24,8 @@ data class ConnectionCheckUiState(
 /** Uses its own dispatcher so cancelling a check never cancels Chat or Work requests. */
 class ConnectionValidator {
     private val client = OkHttpClient.Builder()
-        .connectTimeout(15, TimeUnit.SECONDS).readTimeout(30, TimeUnit.SECONDS)
-        .callTimeout(40, TimeUnit.SECONDS).followRedirects(false).followSslRedirects(false).build()
+        .connectTimeout(20, TimeUnit.SECONDS).readTimeout(60, TimeUnit.SECONDS)
+        .callTimeout(75, TimeUnit.SECONDS).followRedirects(false).followSslRedirects(false).build()
 
     fun cancel() = client.dispatcher.cancelAll()
 
@@ -37,6 +37,9 @@ class ConnectionValidator {
             }
             require(key.isBlank() || root.isHttps) { "Use HTTPS when sending an API key." }
             require(!provider.keyRequired || key.isNotBlank()) { "Enter your ${provider.label} API key." }
+            // Fall back to the provider's documented default when the user hasn't
+            // entered a model id, so a cold catalog endpoint can't block the test.
+            val modelId = preferredModel.ifBlank { provider.defaultModel }
             val catalog = try {
                 ProviderCatalog(client).fetch(provider, root.toString().trimEnd('/'), key.trim())
             } catch (e: IOException) {
@@ -46,18 +49,18 @@ class ConnectionValidator {
                     429 -> throw IOException("The provider’s rate or quota limit was reached. Try again later.")
                 }
                 // Servers without discovery can still validate a saved manual model.
-                if (preferredModel.isBlank()) throw IOException("Couldn’t load models. Check the connection or enter a model ID below to verify it.")
+                if (modelId.isBlank()) throw IOException("Couldn’t load models. Check the connection or enter a model ID below to verify it.")
                 emptyList()
             }
             coroutineContext.ensureActive()
-            val model = catalog.firstOrNull { it.id == preferredModel }
-                ?: preferredModel.takeIf { it.isNotBlank() }?.let { ModelSpec(it) }
+            val model = catalog.firstOrNull { it.id == modelId }
+                ?: modelId.takeIf { it.isNotBlank() }?.let { ModelSpec(it) }
                 ?: catalog.firstOrNull { !ReasoningPolicy.profile(provider, it).available }
                 ?: catalog.firstOrNull()
                 ?: throw IOException("No chat models were found. Enter a model ID below to check the connection.")
 
             // Catalogs may be public. Only a successful authenticated completion verifies access.
-            val payload = JSONObject().put("model", model.id).put("stream", false).put("max_tokens", 1)
+            val payload = JSONObject().put("model", model.id).put("stream", false).put("max_tokens", 4)
                 .put("messages", JSONArray().put(JSONObject().put("role", "user").put("content", "Reply OK.")))
             val request = Request.Builder().url(root.toString().trimEnd('/') + "/chat/completions")
                 .post(payload.toString().toRequestBody("application/json".toMediaType()))

@@ -97,7 +97,7 @@ private fun openWork(context:Context,id:String?=null) {
     }
     options?.let{record->HydraBottomSheet(onDismiss={options=null}){dismiss->
         Column(Modifier.fillMaxWidth().padding(horizontal=16.dp).padding(bottom=24.dp)) {
-            MarqueeTitle(record.title,style=MaterialTheme.typography.titleLarge,surface=cs.surfaceContainerLow,modifier=Modifier.padding(bottom=16.dp))
+            Row(Modifier.fillMaxWidth().padding(bottom=16.dp),verticalAlignment=Alignment.CenterVertically){Icon(Icons.Outlined.Terminal,null,tint=cs.primary);Spacer(Modifier.width(12.dp));MarqueeTitle(record.title,style=MaterialTheme.typography.titleLarge,surface=cs.surfaceContainerLow,modifier=Modifier.weight(1f))}
             TextButton(onClick={dismiss();openWork(context,record.id)},modifier=Modifier.fillMaxWidth()){Icon(Icons.Outlined.ChatBubbleOutline,null);Spacer(Modifier.width(12.dp));Text("Open conversation")}
             TextButton(onClick={dismiss();title=record.title;rename=record},modifier=Modifier.fillMaxWidth()){Icon(Icons.Outlined.Edit,null);Spacer(Modifier.width(12.dp));Text("Rename")}
             TextButton(onClick={dismiss();if(vm.viewRecord(record))folder.launch(null)},enabled=!vm.running,modifier=Modifier.fillMaxWidth()){Icon(Icons.Outlined.FolderOpen,null);Spacer(Modifier.width(12.dp));Text("Change directory")}
@@ -145,9 +145,9 @@ class WorkChatActivity:ComponentActivity() {
 
 data class WorkChatUiState(val title:String="New task",val project:String="Choose a project",val messages:List<Message> = emptyList(),
     val steps:List<WorkStep> = emptyList(),val pendingId:String?=null,val running:Boolean=false,val status:String="Ready",val error:String?=null,
-    val conversationId:String="new",val canSend:Boolean=true,val attachments:List<MessageAttachment> = emptyList(),val attaching:Boolean=false,val progress:String="",val hasProject:Boolean=true)
+    val conversationId:String="new",val canSend:Boolean=true,val attachments:List<MessageAttachment> = emptyList(),val attaching:Boolean=false,val progress:String="",val hasProject:Boolean=true,val streamingResponseId:String?=null)
 
-class WorkChatActions(val onSend:()->Unit={},val onStop:()->Unit={},val onBack:()->Unit={},val onProject:()->Unit={},val onFiles:()->Unit={},
+class WorkChatActions(val onSend:()->Unit={},val onResume:()->Unit={},val onStop:()->Unit={},val onBack:()->Unit={},val onProject:()->Unit={},val onFiles:()->Unit={},
     val onChanges:()->Unit={},val onApprovals:()->Unit={},val onConnections:()->Unit={},val onApprove:(String,Boolean)->Unit={_,_->},val onDismissError:()->Unit={},
     val onCopy:(Message)->Unit={},val onShare:(Message)->Unit={},val onAttachFile:()->Unit={},val onAttachMedia:()->Unit={},
     val onRemoveAttachment:(String)->Unit={},val onRename:()->Unit={})
@@ -165,7 +165,7 @@ class WorkChatActions(val onSend:()->Unit={},val onStop:()->Unit={},val onBack:(
     var renameTitle by rememberSaveable{mutableStateOf("")}
     val active=vm.activeId==id
     val saved=vm.records.firstOrNull{it.id==id}
-    val state=if(active)WorkChatUiState(vm.task.ifBlank{"New task"},vm.projectName,vm.messages,vm.steps,vm.pendingApproval?.id,vm.running,vm.status,vm.error,id,attachments=vm.draftAttachments,attaching=vm.attaching,progress=vm.progress,hasProject=vm.projectUri!=null)
+    val state=if(active)WorkChatUiState(vm.task.ifBlank{"New task"},vm.projectName,vm.messages,vm.steps,vm.pendingApproval?.id,vm.running,vm.status,vm.error,id,attachments=vm.draftAttachments,attaching=vm.attaching,progress=vm.progress,hasProject=vm.projectUri!=null,streamingResponseId=vm.streamingId)
         else WorkChatUiState(saved?.title?:"Task unavailable",saved?.projectName?:"",saved?.messages.orEmpty(),saved?.steps.orEmpty(),status=saved?.status?:"Deleted",conversationId=id,canSend=!vm.running&&saved!=null,hasProject=saved?.projectUri!=null)
     fun activate()=vm.activeId==id||saved?.let{vm.viewRecord(it)}==true
     LaunchedEffect(vm,id) {
@@ -184,6 +184,8 @@ class WorkChatActions(val onSend:()->Unit={},val onStop:()->Unit={},val onBack:(
     val notifications=rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()){}
     val actions=WorkChatActions(onBack=onBack,onSend={
         if(activate()&&vm.followUp(draft,chat)){draft="";if(Build.VERSION.SDK_INT>=33)notifications.launch(Manifest.permission.POST_NOTIFICATIONS)}
+    },onResume={
+        if(activate()&&vm.resume(chat)){if(Build.VERSION.SDK_INT>=33)notifications.launch(Manifest.permission.POST_NOTIFICATIONS)}
     },onStop={if(vm.activeId==id)vm.stop()},onProject={if(!vm.running&&activate())folder.launch(null)},
         onFiles={if(activate()){vm.refreshFiles();files=true}},onChanges={if(activate())changes=true},
         onApprovals={approvals=true},onConnections={connections=true},onApprove=vm::approveStep,onDismissError={vm.error=null},
@@ -250,8 +252,8 @@ class WorkChatActions(val onSend:()->Unit={},val onStop:()->Unit={},val onBack:(
                             }
                         }
                         Box(Modifier.weight(1f)){modelControl()}
-                        FilledIconButton(onClick=if(state.running)actions.onStop else actions.onSend,enabled=state.running||(state.canSend&&!state.attaching&&(draft.isNotBlank()||state.attachments.isNotEmpty())),modifier=Modifier.size(48.dp)) {
-                            Icon(if(state.running)Icons.Outlined.Stop else Icons.Outlined.ArrowUpward,if(state.running)"Stop task"else "Send task message")
+                        FilledIconButton(onClick=if(state.running)actions.onStop else if(!state.running&&state.status=="Cancelled"&&draft.isBlank()&&state.attachments.isEmpty())actions.onResume else actions.onSend,enabled=state.running||(state.canSend&&!state.attaching&&(draft.isNotBlank()||state.attachments.isNotEmpty()||(!state.running&&state.status=="Cancelled"&&draft.isBlank()&&state.attachments.isEmpty()))),modifier=Modifier.size(48.dp)) {
+                            Icon(if(state.running)Icons.Outlined.Stop else if(!state.running&&state.status=="Cancelled"&&draft.isBlank()&&state.attachments.isEmpty())Icons.Outlined.PlayArrow else Icons.Outlined.ArrowUpward,if(state.running)"Stop task"else if(!state.running&&state.status=="Cancelled"&&draft.isBlank()&&state.attachments.isEmpty())"Resume task"else "Send task message")
                         }
                     }
                 }
@@ -265,13 +267,13 @@ class WorkChatActions(val onSend:()->Unit={},val onStop:()->Unit={},val onBack:(
                 HydraIllustration(Modifier.size(112.dp));Spacer(Modifier.height(24.dp))
                 Text("What are we working on?",style=MaterialTheme.typography.headlineMedium)
                 Spacer(Modifier.height(16.dp));Text("Inspect a project, make a change, or research an idea. You can keep refining it here.",style=MaterialTheme.typography.bodyLarge)
-                Spacer(Modifier.height(24.dp));TextButton(onClick=actions.onProject){Icon(Icons.Outlined.FolderOpen,null);Spacer(Modifier.width(8.dp));Text("Choose project")}
-            }else ChatTimeline(ChatTimelineUiState(state.conversationId,state.messages),actions.onCopy,actions.onShare,
+                Spacer(Modifier.height(24.dp));TextButton(onClick=actions.onProject){Icon(Icons.Outlined.FolderOpen,null);Spacer(Modifier.width(8.dp));Text(if(state.hasProject)state.project else "Choose project")}
+            }else ChatTimeline(ChatTimelineUiState(state.conversationId,state.messages,state.streamingResponseId),actions.onCopy,actions.onShare,
                 modifier=Modifier.widthIn(max=760.dp).fillMaxSize(),toolContent={message,_,_->
                     state.steps.firstOrNull{it.id==message.id}?.let{step->WorkToolEntry(step,state.pendingId==step.id){allow->actions.onApprove(step.id,allow)}}
                 },trailingContent={
                     if(state.running&&state.pendingId==null)Row(Modifier.padding(vertical=12.dp),verticalAlignment=Alignment.CenterVertically) {
-                        CircularProgressIndicator(Modifier.size(16.dp),strokeWidth=2.dp);Spacer(Modifier.width(12.dp));ShimmerStatusText(state.progress.ifBlank{if(state.status=="Thinking")"Thinking…"else "Working…"},style=MaterialTheme.typography.bodySmall,maxLines=2)
+                        CircularProgressIndicator(Modifier.size(16.dp),strokeWidth=2.dp);Spacer(Modifier.width(12.dp));ShimmerStatusText(state.progress.ifBlank{if(state.status=="Thinking")"Thinking…"else "Working…"},style=MaterialTheme.typography.bodyLarge,maxLines=2)
                     }else if(!state.running)Text("${state.status}\u2002•\u2002Performed ${state.steps.size} action${if(state.steps.size==1)""else "s"}",style=MaterialTheme.typography.labelMedium,color=cs.onSurfaceVariant,modifier=Modifier.padding(vertical=12.dp))
                 })
         }
@@ -315,6 +317,8 @@ class WorkChatActions(val onSend:()->Unit={},val onStop:()->Unit={},val onBack:(
     if(details)HydraBottomSheet(onDismiss={details=false}){dismiss->
         Column(Modifier.fillMaxWidth().padding(horizontal=16.dp).padding(bottom=24.dp).testTag("work-tool-${step.id}-details")) {
             Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically) {
+                Icon(icon,null,Modifier.size(20.dp),tint=cs.primary)
+                Spacer(Modifier.width(12.dp))
                 Text(title,style=MaterialTheme.typography.titleMedium,modifier=Modifier.weight(1f))
                 IconButton(onClick=dismiss){Icon(Icons.Outlined.Close,"Close tool details")}
             }
@@ -384,7 +388,7 @@ internal fun toolLabel(name:String,args:JSONObject):String {
 @Composable private fun WorkFilesSheet(vm:WorkModel,onDismiss:()->Unit) {
     HydraBottomSheet(onDismiss=onDismiss) { _ ->
         Column(Modifier.fillMaxWidth().padding(horizontal=16.dp).padding(bottom=24.dp)) {
-            Text("Project files",style=MaterialTheme.typography.titleLarge,modifier=Modifier.padding(8.dp))
+            Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically){Icon(Icons.Outlined.FolderOpen,null,tint=MaterialTheme.colorScheme.primary);Spacer(Modifier.width(12.dp));Text("Project files",style=MaterialTheme.typography.titleLarge,modifier=Modifier.weight(1f))}
             if(vm.browserPath.isNotEmpty())TextButton(onClick=vm::parentFolder){Icon(Icons.Outlined.KeyboardArrowUp,null);Spacer(Modifier.width(8.dp));MarqueeTitle(vm.browserPath,surface=MaterialTheme.colorScheme.surfaceContainerLow,style=MaterialTheme.typography.labelLarge)}
             LazyColumn(Modifier.heightIn(max=480.dp)) {
                 if(vm.files.isEmpty())item{Text("No files to display. Choose a project folder first.",Modifier.padding(16.dp))}
@@ -392,12 +396,12 @@ internal fun toolLabel(name:String,args:JSONObject):String {
             }
         }
     }
-    vm.selectedFile?.let{(path,text)->HydraBottomSheet(onDismiss={vm.selectedFile=null}){_->Column(Modifier.fillMaxWidth().padding(16.dp).padding(bottom=24.dp)){MarqueeTitle(path,style=MaterialTheme.typography.titleLarge,surface=MaterialTheme.colorScheme.surfaceContainerLow);WorkToolText(text)}}}
+    vm.selectedFile?.let{(path,text)->HydraBottomSheet(onDismiss={vm.selectedFile=null}){_->Column(Modifier.fillMaxWidth().padding(horizontal=16.dp).padding(bottom=24.dp)){Row(verticalAlignment=Alignment.CenterVertically){Icon(Icons.Outlined.Description,null,tint=MaterialTheme.colorScheme.primary);Spacer(Modifier.width(12.dp));MarqueeTitle(path,style=MaterialTheme.typography.titleLarge,surface=MaterialTheme.colorScheme.surfaceContainerLow,modifier=Modifier.weight(1f))};Spacer(Modifier.height(16.dp));WorkToolText(text)}}}
 }
 @Composable private fun WorkChangesSheet(changes:List<FileChange>,onDismiss:()->Unit) {
     HydraBottomSheet(onDismiss=onDismiss){_->
         Column(Modifier.fillMaxWidth().padding(horizontal=16.dp).padding(bottom=24.dp)) {
-            Text("Changes",style=MaterialTheme.typography.titleLarge,modifier=Modifier.padding(8.dp))
+            Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically){Icon(Icons.Outlined.Difference,null,tint=MaterialTheme.colorScheme.primary);Spacer(Modifier.width(12.dp));Text("Changes",style=MaterialTheme.typography.titleLarge,modifier=Modifier.weight(1f))}
             LazyColumn(Modifier.heightIn(max=540.dp),verticalArrangement=Arrangement.spacedBy(12.dp)) {
                 if(changes.isEmpty())item{Text("No recorded file changes in this task.",Modifier.padding(16.dp))}
                 items(changes){change->Column{MarqueeTitle(change.path,style=MaterialTheme.typography.titleMedium,surface=MaterialTheme.colorScheme.surfaceContainerLow);Text("Before",style=MaterialTheme.typography.labelMedium);WorkToolText(change.before.ifEmpty{"New file"});HorizontalDivider();Text("After",style=MaterialTheme.typography.labelMedium);WorkToolText(change.after.ifEmpty{"Empty or removed file"})}}

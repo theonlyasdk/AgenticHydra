@@ -3,26 +3,32 @@ plugins {
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
 }
+import java.util.Properties
+
+val localProps = Properties().apply {
+    val f = rootProject.file("local.properties")
+    if (f.exists()) f.inputStream().use { load(it) }
+}
+
 android {
     namespace = "app.agentichydra"
     compileSdk = 35
-    buildToolsVersion = "35.0.0"
     defaultConfig {
         applicationId = "app.agentichydra"
         minSdk = 26
         targetSdk = 35
-        versionCode = 3
-        versionName = "1.2.0"
+        versionCode = 4
+        versionName = "1.3.0"
     }
     signingConfigs {
-        create("preview") {
-            storeFile = file(System.getenv("HYDRA_KEYSTORE") ?: "../preview.keystore")
-            storePassword = System.getenv("HYDRA_STORE_PASSWORD") ?: "hydra-preview"
-            keyAlias = "hydra"
-            keyPassword = System.getenv("HYDRA_STORE_PASSWORD") ?: "hydra-preview"
+        create("release") {
+            storeFile = file(localProps.getProperty("hydra.keystore", System.getenv("HYDRA_KEYSTORE") ?: "../hydra-release.keystore"))
+            storePassword = localProps.getProperty("hydra.storePassword", System.getenv("HYDRA_STORE_PASSWORD") ?: "hydra-preview")
+            keyAlias = localProps.getProperty("hydra.keyAlias", "hydra")
+            keyPassword = localProps.getProperty("hydra.keyPassword", localProps.getProperty("hydra.storePassword", System.getenv("HYDRA_STORE_PASSWORD") ?: "hydra-preview"))
         }
     }
-    buildTypes { release { isMinifyEnabled = false; signingConfig = signingConfigs.getByName("preview") } }
+    buildTypes { release { isMinifyEnabled = false; signingConfig = signingConfigs.getByName("release") } }
     buildFeatures { compose = true }
     testOptions {
         unitTests.isIncludeAndroidResources = true

@@ -301,8 +301,9 @@ data class ReasoningSelectorUiState(val levels:List<String>,val selected:String)
     DisposableEffect(validator) { onDispose { checkJob?.cancel(); validator.cancel() } }
     val cs=MaterialTheme.colorScheme
     HydraBottomSheet(onDismiss=onDismiss,containerColor=cs.surfaceContainerLow) { dismiss ->
-        Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).imePadding().padding(24.dp),verticalArrangement=Arrangement.spacedBy(16.dp)) {
-            Row(Modifier.testTag("connections-header"),verticalAlignment=Alignment.CenterVertically){Icon(Icons.Outlined.Hub,null,tint=cs.primary);Spacer(Modifier.width(12.dp));Text("Connections",style=MaterialTheme.typography.titleLarge)}
+        Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).imePadding()) {
+            Row(Modifier.fillMaxWidth().padding(horizontal=16.dp).testTag("connections-header"),verticalAlignment=Alignment.CenterVertically){Icon(Icons.Outlined.Hub,null,tint=cs.primary);Spacer(Modifier.width(12.dp));Text("Connections",style=MaterialTheme.typography.titleLarge)}
+            Column(Modifier.fillMaxWidth().padding(horizontal=24.dp).padding(top=16.dp,bottom=24.dp),verticalArrangement=Arrangement.spacedBy(16.dp)) {
             fun formProblem(): String? {
                 val parsed=runCatching{java.net.URI(url.trim())}.getOrNull()
                 return when {
@@ -363,6 +364,7 @@ data class ReasoningSelectorUiState(val levels:List<String>,val selected:String)
                         }
                     }
                 }
+            }
             }
         }
     }

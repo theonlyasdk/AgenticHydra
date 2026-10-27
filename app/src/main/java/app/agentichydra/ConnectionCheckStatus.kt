@@ -45,13 +45,7 @@ import kotlinx.coroutines.delay
         contentDescription = "Checking connection"
         progressBarRangeInfo = ProgressBarRangeInfo.Indeterminate
     }, verticalAlignment = Alignment.CenterVertically) {
-        // The real Material 3 Expressive shape-morphing indicator, hosted in Compose.
-        AndroidView(factory = { context ->
-            LoadingIndicator(ContextThemeWrapper(context, com.google.android.material.R.style.Theme_Material3_DayNight_NoActionBar))
-        }, update = { indicator ->
-            indicator.setIndicatorColor(cs.primary.toArgb())
-            indicator.setContainerColor(cs.surfaceContainerLow.toArgb())
-        }, modifier = Modifier.size(56.dp))
+        HydraLoadingIndicator(56.dp, cs.primary, cs.surfaceContainerLow)
         Spacer(Modifier.width(16.dp))
         Box(Modifier.weight(1f).clipToBounds().verticalFadingEdges(cs.surfaceContainerLow, 12.dp), contentAlignment = Alignment.CenterStart) {
             AnimatedContent(targetState = message, label = "Connection status", transitionSpec = {
@@ -74,6 +68,16 @@ import kotlinx.coroutines.delay
         style = style.copy(brush = Brush.linearGradient(
             0f to cs.onSurfaceVariant, .3f to cs.onSurfaceVariant, .5f to highlight, .7f to cs.onSurfaceVariant, 1f to cs.onSurfaceVariant,
             start = Offset((shine - .3f) * textWidth, 0f), end = Offset((shine + .3f) * textWidth, 0f))))
+}
+
+@Composable fun HydraLoadingIndicator(size: androidx.compose.ui.unit.Dp, indicator: androidx.compose.ui.graphics.Color, container: androidx.compose.ui.graphics.Color) {
+    // The real Material 3 Expressive shape-morphing indicator, hosted in Compose.
+    AndroidView(factory = { context ->
+        LoadingIndicator(ContextThemeWrapper(context, com.google.android.material.R.style.Theme_Material3_DayNight_NoActionBar))
+    }, update = { view ->
+        view.setIndicatorColor(indicator.toArgb())
+        view.setContainerColor(container.toArgb())
+    }, modifier = Modifier.size(size))
 }
 
 @Preview(name = "Connection check light")

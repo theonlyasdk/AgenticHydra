@@ -65,8 +65,8 @@ data class Message(
 }
 data class Conversation(val id: String, val title: String, val messages: List<Message>,val titleSource:String="prompt")
 enum class Provider(val label: String, val base: String, val defaultModel: String, val keyRequired: Boolean = true) {
-    NIM("NVIDIA NIM", "https://integrate.api.nvidia.com/v1", ""),
-    GEMINI("Gemini", "https://generativelanguage.googleapis.com/v1beta/openai", ""),
+    NIM("NVIDIA NIM", "https://integrate.api.nvidia.com/v1", "nvidia/nemotron-3.5-lightning-30b-a3b"),
+    GEMINI("Gemini", "https://generativelanguage.googleapis.com/v1beta/openai", "gemini-3.5-flash"),
     OLLAMA("Ollama", "http://192.168.1.10:11434/v1", "", false),
     LLAMACPP("llama.cpp", "http://192.168.1.10:8080/v1", "", false),
     CUSTOM("Custom endpoint", "https://api.example.com/v1", "", false)
