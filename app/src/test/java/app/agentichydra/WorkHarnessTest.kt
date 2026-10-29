@@ -27,6 +27,10 @@ class WorkHarnessTest {
         assertEquals("old old\n",tools.read("src/main.kt"))
         run("replace_in_file","""{"path":"src/main.kt","old_text":"old","new_text":"new","replace_all":true}""")
         run("append_file","""{"path":"src/main.kt","content":"line two"}""")
+        run("write_file","""{"path":"src/diff.txt","content":"alpha\nbeta\ngamma\n"}""")
+        run("apply_diff","""{"path":"src/diff.txt","diff":"------- SEARCH\nbeta\n=======\nBETA\n+++++++ REPLACE\n------- SEARCH\ngamma\n=======\nGAMMA\n+++++++ REPLACE"}""")
+        assertEquals("alpha\nBETA\nGAMMA\n",tools.read("src/diff.txt"))
+        assertTrue(runCatching{run("apply_diff","""{"path":"src/diff.txt","diff":"------- SEARCH\nmissing\n=======\nx\n+++++++ REPLACE"}""")}.isFailure)
         assertTrue(run("search_files","""{"path":"","query":"line two"}""").output.contains("src/main.kt:2:"))
         assertTrue(run("find_files","""{"path":"","pattern":"*.kt"}""").output.contains("src/main.kt"))
         run("copy_file","""{"source":"src/main.kt","destination":"copy.kt"}""")
@@ -47,9 +51,11 @@ class WorkHarnessTest {
         assertEquals(4,repaired.length())
         assertEquals("b",repaired.getJSONObject(3).getString("tool_call_id"))
         assertEquals(repaired.toString(),repairedWorkHistory(repaired.toString()).toString())
-        assertEquals(48,WorkTools.schema().length())
-        assertEquals(48,WorkTools.names.distinct().size)
-        listOf("append_file","replace_in_file","delete_file","move_file","copy_file","create_directory","git_status","git_diff").forEach{assertTrue(ToolPolicy.approval(ApprovalMode.CHANGES,it))}
+        assertEquals(53,WorkTools.schema().length())
+        assertEquals(53,WorkTools.names.distinct().size)
+        listOf("append_file","replace_in_file","apply_diff","delete_file","move_file","copy_file","create_directory","git_status","git_diff").forEach{assertTrue(ToolPolicy.approval(ApprovalMode.CHANGES,it))}
+        assertTrue(ToolPolicy.approval(ApprovalMode.CHANGES,"start_task"))
+        assertFalse(ToolPolicy.approval(ApprovalMode.CHANGES,"read_task_output"))
     }
 
     @Test fun searchParsesSourceLinksAndWebAccessRejectsPrivateAddresses() {

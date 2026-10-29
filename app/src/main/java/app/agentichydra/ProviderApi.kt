@@ -92,9 +92,13 @@ object ReasoningPolicy {
             id.contains("nemotron-3-super") -> ReasoningProfile(listOf("none", "low", "high"))
             id.contains("glm-5.3-flash") -> ReasoningProfile(listOf("low", "medium", "high"), "template_effort")
             id.contains("qwen3") -> ReasoningProfile(listOf("none", "high"), "enable_thinking")
+            id.contains("deepseek") || id.contains("r1") -> ReasoningProfile(listOf("none", "high"), "enable_thinking")
             else -> ReasoningProfile(emptyList())
         }
-        if (provider == Provider.OLLAMA && (id.contains("qwen3") || id.contains("deepseek-r1"))) return ReasoningProfile(listOf("none", "high"))
+        if (provider == Provider.OLLAMA && (id.contains("qwen3") || id.contains("deepseek-r1") || id.contains("deepseek") || id.contains("r1"))) return ReasoningProfile(listOf("none", "high"))
+        if (id.contains("deepseek-r1") || id.contains("deepseek-reasoner") || id.contains("r1")) return ReasoningProfile(listOf("none", "high"))
+        if (id.contains("o1") || id.contains("o3") || id.contains("o4")) return ReasoningProfile(listOf("low", "medium", "high"))
+        if (model.thinking == true) return ReasoningProfile(listOf("low", "medium", "high"))
         return ReasoningProfile(emptyList())
     }
     fun apply(payload: JSONObject, profile: ReasoningProfile, effort: String) {

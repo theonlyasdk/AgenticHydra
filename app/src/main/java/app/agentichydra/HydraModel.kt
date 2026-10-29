@@ -42,6 +42,8 @@ data class Message(
     val previousModelName: String = "",
     val previousProviderName: String = "",
     val attachments:List<MessageAttachment> = emptyList(),
+    val finalResponse:Boolean = true,
+    val thought: String = "",
 ) {
     fun json() = JSONObject().put("role",role).put("text",text).put("id",id).put("createdAt",createdAt)
         .put("modelId",modelId).put("modelName",modelName).put("providerName",providerName)
@@ -49,6 +51,8 @@ data class Message(
         .apply {
             metrics?.let { put("metrics",it.json()) }
             if(attachments.isNotEmpty())put("attachments",JSONArray().apply{attachments.forEach{put(it.json())}})
+            put("finalResponse",finalResponse)
+            if(thought.isNotBlank()) put("thought", thought)
         }
     companion object {
         fun fromJson(data: JSONObject): Message {
@@ -59,11 +63,14 @@ data class Message(
                 data.optLong("createdAt",0),data.optString("modelId"),data.optString("modelName"),data.optString("providerName"),
                 stats?.let { ResponseMetrics(it.optInt("outputTokens"),it.optLong("elapsedMillis"),it.optBoolean("estimated"),it.optLong("completedAt")) },
                 data.optString("previousModelId"),data.optString("previousModelName"),data.optString("previousProviderName"),
-                (0 until attached.length()).map{MessageAttachment.fromJson(attached.getJSONObject(it))})
+                (0 until attached.length()).map{MessageAttachment.fromJson(attached.getJSONObject(it))},
+                data.optBoolean("finalResponse",true),
+                data.optString("thought", ""))
         }
     }
 }
-data class Conversation(val id: String, val title: String, val messages: List<Message>,val titleSource:String="prompt")
+data class Conversation(val id: String, val title: String, val messages: List<Message>,val titleSource:String="prompt",
+    val steps:List<WorkStep> = emptyList(),val apiHistory:String="[]")
 enum class Provider(val label: String, val base: String, val defaultModel: String, val keyRequired: Boolean = true) {
     NIM("NVIDIA NIM", "https://integrate.api.nvidia.com/v1", "nvidia/nemotron-3.5-lightning-30b-a3b"),
     GEMINI("Gemini", "https://generativelanguage.googleapis.com/v1beta/openai", "gemini-3.5-flash"),
@@ -127,14 +134,21 @@ class HydraModel(app: Application) : AndroidViewModel(app) {
     private var generation = 0
     private var responseStartedAt = -1L
     private var responseTokens: Int? = null
+    var steps by mutableStateOf<List<WorkStep>>(emptyList()); private set
+    var pendingQuestions by mutableStateOf<AgentQuestionRequest?>(null); private set
+    private var questionDecision: CompletableDeferred<String>? = null
+    private val web = WorkWeb(client)
+    // Raw API-side conversation (assistant tool calls + their results), so follow-ups stay well-formed.
+    private var history = JSONArray()
     init {
         runCatching {
             val array = JSONArray(prefs.getString("history", "[]"))
             conversations = (0 until array.length()).map { i ->
                 val o = array.getJSONObject(i); val a = o.getJSONArray("messages")
+                val savedSteps=o.optJSONArray("steps")?:JSONArray()
                 Conversation(o.getString("id"), o.getString("title"), (0 until a.length()).map { j ->
                     Message.fromJson(a.getJSONObject(j))
-                },o.optString("titleSource","prompt"))
+                },o.optString("titleSource","prompt"),(0 until savedSteps.length()).map{WorkStep.fromJson(savedSteps.getJSONObject(it))},o.optString("apiHistory","[]"))
             }
         }
         loadCatalog()
@@ -177,10 +191,18 @@ class HydraModel(app: Application) : AndroidViewModel(app) {
         effort = value
         prefs.edit().putString("effort_${provider.name}_$model", value).apply()
     }
-    private fun catalogKey(): String {
-        val id = java.security.MessageDigest.getInstance("SHA-256").digest((provider.name + endpoint + apiKey).toByteArray()).joinToString("") { "%02x".format(it) }
+    private fun catalogKey(p: Provider = provider, base: String = endpoint, key: String = apiKey): String {
+        val id = java.security.MessageDigest.getInstance("SHA-256").digest((p.name + base + key).toByteArray()).joinToString("") { "%02x".format(it) }
         return "catalog_$id"
     }
+    /** Cached catalog of any provider without making it the active connection, for draft previews in the picker. */
+    fun cachedCatalog(p: Provider): List<ModelSpec> = runCatching {
+        ProviderCatalog.parse(JSONObject(prefs.getString(catalogKey(p, savedEndpoint(p), savedKey(p)), "{\"data\":[]}")!!))
+    }.getOrDefault(emptyList())
+    fun catalogAge(p: Provider): Long = System.currentTimeMillis() - prefs.getLong(catalogKey(p, savedEndpoint(p), savedKey(p)) + "_time", 0L)
+    fun savedEffort(p: Provider, model: String) = prefs.getString("effort_${p.name}_$model", "auto")!!
+    fun manualSelection(p: Provider, model: String) = model.isNotBlank() &&
+        prefs.getString("manual_model_${p.name}", "") == model && prefs.getString("manual_endpoint_${p.name}", "") == savedEndpoint(p)
     private fun loadCatalog() {
         customModelSelected=model.isNotBlank()&&prefs.getString("manual_model_${provider.name}","")==model&&
             prefs.getString("manual_endpoint_${provider.name}","")==endpoint
@@ -189,13 +211,19 @@ class HydraModel(app: Application) : AndroidViewModel(app) {
         discoveryError = null
         effort = prefs.getString("effort_${provider.name}_$model", "auto")!!
     }
-    fun refreshModels() {
+    fun refreshModels(target: Provider = provider) {
         val current = ++discoveryGeneration
-        val p = provider; val base = endpoint; val key = apiKey; val cache = catalogKey()
+        val p = target; val base = savedEndpoint(p); val key = savedKey(p); val cache = catalogKey(p, base, key)
+        // Only the active connection updates shared discovery state; drafts of other
+        // providers just warm their cache so the picker can preview them.
+        val visible = p == provider
         if (p != Provider.NIM && p.keyRequired && key.isBlank()) {
-            discovering = false; discoveryError = "Add a ${p.label} API key in Connections."; return
+            discovering = false
+            if (visible) discoveryError = "Add a ${p.label} API key in Connections."
+            return
         }
-        discovering = true; discoveryError = null
+        discovering = true
+        if (visible) discoveryError = null
         viewModelScope.launch {
             try {
                 val (catalog,catalogJson) = withContext(Dispatchers.IO) {
@@ -203,13 +231,16 @@ class HydraModel(app: Application) : AndroidViewModel(app) {
                     data to JSONObject().put("data",JSONArray().apply{data.forEach{put(it.json())}}).toString()
                 }
                 if (current != discoveryGeneration) return@launch
-                models = catalog; catalogUpdated = System.currentTimeMillis()
+                catalogUpdated = System.currentTimeMillis()
                 prefs.edit().putString(cache,catalogJson).putLong(cache + "_time", catalogUpdated).apply()
-                if (catalog.isEmpty()) discoveryError = "No chat models returned. Try a manual model ID."
+                if (visible) {
+                    models = catalog
+                    if (catalog.isEmpty()) discoveryError = "No chat models returned. Try a manual model ID."
+                }
                 // Do not silently switch to a potentially more expensive model.
             } catch (e: Exception) {
                 if (e is CancellationException) throw e
-                if (current == discoveryGeneration) discoveryError = e.message ?: "Couldn’t refresh models."
+                if (current == discoveryGeneration && visible) discoveryError = e.message ?: "Couldn’t refresh models."
             } finally { if (current == discoveryGeneration) discovering = false }
         }
     }
@@ -218,7 +249,7 @@ class HydraModel(app: Application) : AndroidViewModel(app) {
         val saved = conversations.firstOrNull { it.id == activeId }
         val title = saved?.title
             ?: messages.firstOrNull { it.role=="user" }?.text?.substringBefore("\n")?.take(60).orEmpty()
-        conversations = listOf(Conversation(activeId, title, messages,saved?.titleSource?:"prompt")) + conversations.filter { it.id != activeId }
+        conversations = listOf(Conversation(activeId, title, messages,saved?.titleSource?:"prompt",steps,history.toString())) + conversations.filter { it.id != activeId }
         conversations = conversations.take(100)
         persistHistory()
     }
@@ -226,7 +257,8 @@ class HydraModel(app: Application) : AndroidViewModel(app) {
         val all = JSONArray()
         conversations.forEach { c ->
             val ms = JSONArray(); c.messages.forEach { ms.put(it.json()) }
-            all.put(JSONObject().put("id", c.id).put("title", c.title).put("titleSource",c.titleSource).put("messages", ms))
+            all.put(JSONObject().put("id", c.id).put("title", c.title).put("titleSource",c.titleSource).put("messages", ms)
+                .put("steps",JSONArray().apply{c.steps.forEach{put(it.json())}}).put("apiHistory",c.apiHistory))
         }
         prefs.edit().putString("history", all.toString()).apply()
     }
@@ -236,14 +268,21 @@ class HydraModel(app: Application) : AndroidViewModel(app) {
         conversations = conversations.map { if (it.id == id) it.copy(title = clean,titleSource="manual") else it }
         persistHistory()
     }
+    /** Deletes every saved chat conversation at once. Cannot be undone. */
+    fun clearAllConversations() {
+        stop()
+        conversations = emptyList()
+        newChat()
+        persistHistory()
+    }
     fun deleteConversation(id: String) {
         // Cancel streaming before removal so its final checkpoint cannot restore the entry.
         if (activeId == id) newChat()
         conversations = conversations.filterNot { it.id == id }
         persistHistory()
     }
-    fun newChat() { stop(); messages = emptyList(); activeId = UUID.randomUUID().toString(); error = null; attachment = null }
-    fun open(c: Conversation) { stop(); activeId = c.id; messages = c.messages; error = null; attachment = null }
+    fun newChat() { stop(); messages = emptyList(); steps = emptyList(); history = JSONArray(); activeId = UUID.randomUUID().toString(); error = null; attachment = null }
+    fun open(c: Conversation) { stop(); activeId = c.id; messages = c.messages; steps = c.steps; history = repairedWorkHistory(c.apiHistory); error = null; attachment = null }
     private fun recordModelChange(force: Boolean = false, oldModel: ModelSpec? = null, oldProvider: Provider? = null) {
         if(model.isBlank()||messages.isEmpty())return
         val previous=messages.lastOrNull { it.modelId.isNotBlank() }
@@ -257,15 +296,16 @@ class HydraModel(app: Application) : AndroidViewModel(app) {
     }
     private fun finishResponseMetrics() {
         val last=messages.lastOrNull()?:return
-        if(last.role!="assistant"||last.text.isBlank()||last.metrics!=null||responseStartedAt<0L)return
+        if(last.role!="assistant"||(last.text.isBlank()&&last.thought.isBlank())||last.metrics!=null||responseStartedAt<0L)return
         val elapsed=(SystemClock.elapsedRealtime()-responseStartedAt).coerceAtLeast(1)
-        val tokens=responseTokens?:kotlin.math.ceil(last.text.toByteArray(Charsets.UTF_8).size/4.0).toInt().coerceAtLeast(1)
+        val tokens=responseTokens?:kotlin.math.ceil((last.text+last.thought).toByteArray(Charsets.UTF_8).size/4.0).toInt().coerceAtLeast(1)
         messages=messages.dropLast(1)+last.copy(metrics=ResponseMetrics(tokens,elapsed,responseTokens==null,System.currentTimeMillis()))
     }
     fun stop() {
         generation++
         call?.cancel(); call = null; job?.cancel(); job = null
-        if (messages.lastOrNull()?.text?.isBlank() == true) messages = messages.dropLast(1)
+        questionDecision?.cancel(); questionDecision = null; pendingQuestions = null
+        if (messages.lastOrNull()?.let{it.text.isBlank()&&it.thought.isBlank()} == true) messages = messages.dropLast(1)
         finishResponseMetrics();responseStartedAt=-1L;responseTokens=null
         busy = false; persist()
     }
@@ -278,82 +318,167 @@ class HydraModel(app: Application) : AndroidViewModel(app) {
         if (url?.scheme == "http" && apiKey.isNotEmpty()) { error = "Use HTTPS when sending an API key."; return false }
         val content = input.trim() + (attachment?.let { "\n\nAttached file: ${it.first}\n```\n${it.second}\n```" } ?: "")
         recordModelChange()
+        // Seed the raw API history from visible messages once, then add this turn.
+        history = repairedWorkHistory(history.toString())
+        if (history.length() == 0) {
+            messages.filter { it.role=="user"||it.role=="assistant" }.forEach { history.put(JSONObject().put("role", it.role).put("content", it.text)) }
+        }
         messages = messages + Message("user", content); attachment = null; error = null; busy = true; persist()
-        val previous = messages.filter { it.role=="user"||it.role=="assistant" }
+        history.put(JSONObject().put("role", "user").put("content", content))
+        beginTurn()
+        return true
+    }
+
+    /** Launch a provider turn against the current history without appending a user prompt. */
+    private fun beginTurn(): Boolean {
+        error=null; busy=true
         val currentGeneration = ++generation
         val selectedReasoning = reasoning; val selectedEffort = effort
         val requestProvider=provider;val requestModel=model;val requestEndpoint=endpoint;val requestKey=apiKey
         val requestConversationId=activeId
         responseStartedAt=SystemClock.elapsedRealtime();responseTokens=null
-        messages = messages + Message("assistant", "",modelId=model,modelName=selectedModel.name,providerName=provider.label)
+        // The placeholder shows the waiting indicator until the first streamed chunk arrives.
+        val placeholder=Message("assistant", "",modelId=requestModel,modelName=selectedModel.name,providerName=requestProvider.label)
+        messages = messages + placeholder
         job = viewModelScope.launch {
-            var completed=false
-            try {
-                withContext(Dispatchers.IO) {
-                    val ms = JSONArray().put(JSONObject().put("role", "system").put("content", "You are Hydra, a helpful, precise assistant. This is chat mode. Do not claim to execute commands or edit files. Offer clear practical answers."))
-                    previous.forEach { ms.put(JSONObject().put("role", it.role).put("content", it.text)) }
-                    val payload = JSONObject().put("model", requestModel).put("messages", ms).put("stream", true)
-                    if(requestProvider!=Provider.CUSTOM)payload.put("stream_options",JSONObject().put("include_usage",true))
-                    ReasoningPolicy.apply(payload, selectedReasoning, selectedEffort)
-                    val request = Request.Builder().url("$requestEndpoint/chat/completions")
-                        .post(payload.toString().toRequestBody("application/json".toMediaType()))
-                        .header("Accept", "text/event-stream")
-                        .apply { if (requestKey.isNotBlank()) header("Authorization", "Bearer $requestKey") }.build()
-                    var currentCall = client.newCall(request); call = currentCall
-                    var streamedResponse=currentCall.execute()
-                    if(streamedResponse.code in listOf(400,422)&&payload.has("stream_options")) {
-                        val detail=streamedResponse.peekBody(16384).string()
-                        if(detail.contains("stream_options",true)||detail.contains("include_usage",true)) {
-                            streamedResponse.close();currentCoroutineContext().ensureActive()
-                            payload.remove("stream_options")
-                            currentCall=client.newCall(request.newBuilder().post(payload.toString().toRequestBody("application/json".toMediaType())).build())
-                            call=currentCall;streamedResponse=currentCall.execute()
+            var completed=false;var droppedTools=false;var includeTools=true;var streamDraftId:String?=placeholder.id;var turns=0
+            var streamText = ""; var streamThought = ""
+            var lastDraftPush = 0L
+            var pendingDraftText: String? = null
+            var pendingDraftThought: String? = null
+            var draftFlushJob: Job? = null
+
+            suspend fun dispatchDraft(snapshot: String, thoughtSnapshot: String) {
+                val existing = streamDraftId
+                if (existing == null) {
+                    val draft = Message("assistant", snapshot, modelId = requestModel, modelName = selectedModel.name, providerName = requestProvider.label, thought = thoughtSnapshot)
+                    streamDraftId = draft.id
+                    withContext(Dispatchers.Main) { if (currentGeneration == generation) messages = messages + draft }
+                } else withContext(Dispatchers.Main) {
+                    if (currentGeneration == generation) messages = messages.map { if (it.id == existing) it.copy(text = snapshot, thought = thoughtSnapshot) else it }
+                }
+            }
+
+            suspend fun publishDraft(snapshot: String, thoughtSnapshot: String = "") {
+                val now = android.os.SystemClock.elapsedRealtime()
+                val isFirst = streamDraftId == null
+                if (isFirst || now - lastDraftPush >= 32L) {
+                    draftFlushJob?.cancel()
+                    draftFlushJob = null
+                    lastDraftPush = now
+                    dispatchDraft(snapshot, thoughtSnapshot)
+                } else {
+                    pendingDraftText = snapshot
+                    pendingDraftThought = thoughtSnapshot
+                    if (draftFlushJob?.isActive != true) {
+                        draftFlushJob = viewModelScope.launch {
+                            delay(32L)
+                            val pText = pendingDraftText ?: snapshot
+                            val pThought = pendingDraftThought ?: thoughtSnapshot
+                            lastDraftPush = android.os.SystemClock.elapsedRealtime()
+                            dispatchDraft(pText, pThought)
                         }
                     }
-                    streamedResponse.use { response ->
-                        if (!response.isSuccessful) throw IOException(when(response.code) {
-                            400, 422 -> "The model rejected this request. Try Default reasoning or choose a compatible model."
-                            401, 403 -> "Access denied. Check your API key and model permissions."
-                            404 -> "Model or endpoint not found. Check the connection settings."
-                            429 -> "Provider limit reached. Wait a moment and try again."
-                            else -> "Provider returned HTTP ${response.code}. Please try again."
-                        })
-                        val source = response.body?.source() ?: throw IOException("Provider returned an empty response.")
-                        var output = ""
-                        while (!source.exhausted()) {
-                            currentCoroutineContext().ensureActive()
-                            val line = source.readUtf8Line() ?: break
-                            if (!line.startsWith("data:")) continue
-                            val data = line.removePrefix("data:").trim()
-                            if (data == "[DONE]") break
-                            if (data.isEmpty()) continue
-                            val event = JSONObject(data)
-                            if (event.has("error")) throw IOException("The provider reported a streaming error. Check the model and try again.")
-                            val usedTokens=event.optJSONObject("usage")?.optInt("completion_tokens",-1)?:-1
-                            if(usedTokens>0)withContext(Dispatchers.Main){if(currentGeneration==generation)responseTokens=usedTokens}
-                            val delta = event.optJSONArray("choices")?.optJSONObject(0)?.optJSONObject("delta")
-                            val chunk = if (delta?.isNull("content") == false) delta.optString("content", "") else ""
-                            if (chunk.isNotEmpty()) {
-                                output += chunk
-                                val snapshot = output
-                                withContext(Dispatchers.Main) {
-                                    if (currentGeneration == generation) messages = messages.dropLast(1) + messages.last().copy(text=snapshot)
+                }
+            }
+            try {
+                withContext(Dispatchers.IO) {
+                    while(true) {
+                        currentCoroutineContext().ensureActive()
+                        // Rebuild the wire every round so prior tool calls and results are replayed.
+                        val wire=JSONArray().put(JSONObject().put("role","system").put("content",chatSystemPrompt()))
+                        for (i in 0 until history.length()) wire.put(history.getJSONObject(i))
+                        val payload=JSONObject().put("model",requestModel).put("messages",wire)
+                            .put("tools",ChatTools.schema()).put("tool_choice","auto").put("stream",true)
+                        if(requestProvider!=Provider.CUSTOM)payload.put("stream_options",JSONObject().put("include_usage",true))
+                        ReasoningPolicy.apply(payload, selectedReasoning, selectedEffort)
+                        val turnPayload=if(includeTools)payload else JSONObject(payload.toString()).apply{remove("tools");remove("tool_choice")}
+                        val turn=WorkStreamTurn(
+                            client,
+                            "$requestEndpoint/chat/completions",
+                            requestKey,
+                            turnPayload,
+                            requestProvider,
+                            onCall={active->call=active},
+                            retryWithoutTools=true,
+                            onThought={thoughtChunk->streamThought=thoughtChunk;publishDraft(streamText,thoughtChunk)}
+                        ){snapshot->streamText=snapshot;publishDraft(snapshot,streamThought)}
+                        val response=turn.run()
+                        if(turn.droppedTools){droppedTools=true;includeTools=false}
+                        currentCoroutineContext().ensureActive()
+                        val message=response.getJSONArray("choices").getJSONObject(0).getJSONObject("message")
+                        history.put(message)
+                        val rawText=if(message.isNull("content"))""else message.optString("content","")
+                        val rawThought=message.optString("reasoning_content").ifEmpty{message.optString("reasoning").ifEmpty{message.optString("thought")}}
+                        val (text, finalThought) = extractThought(rawText, rawThought.ifEmpty{streamThought})
+                        response.optJSONObject("usage")?.optInt("completion_tokens",-1)?.takeIf{it>0}?.let{used->
+                            withContext(Dispatchers.Main){if(currentGeneration==generation)responseTokens=used}
+                        }
+                        draftFlushJob?.cancel()
+                        draftFlushJob = null
+                        val finishedDraft=streamDraftId
+                        if (finishedDraft != null) {
+                            withContext(Dispatchers.Main) {
+                                if (currentGeneration == generation) {
+                                    messages = messages.map {
+                                        if (it.id == finishedDraft) it.copy(text = text, thought = finalThought) else it
+                                    }
                                 }
                             }
                         }
-                        if (output.isBlank()) throw IOException("The model returned no text. Try another model or prompt.")
+                        val calls=message.optJSONArray("tool_calls")
+                        if(calls==null||calls.length()==0) {
+                            check(text.isNotBlank() || finalThought.isNotBlank()){"The model returned no text. Try another model or prompt."}
+                            completed=true
+                            return@withContext
+                        }
+                        for(i in 0 until calls.length()) {
+                            currentCoroutineContext().ensureActive()
+                            val tool=calls.getJSONObject(i);val fn=tool.getJSONObject("function")
+                            val name=fn.getString("name");val argsText=fn.get("arguments").toString()
+                            val step=WorkStep(name,argsText)
+                            withContext(Dispatchers.Main){
+                                if(currentGeneration==generation) {
+                                    steps=steps+step
+                                    messages=messages+Message("tool",name,id=step.id,createdAt=step.createdAt)
+                                    persist()
+                                }
+                            }
+                            val result=try{executeChatTool(name,JSONObject(argsText))}
+                                catch(e:CancellationException){throw e}
+                                catch(e:Exception){WorkToolResult("Tool error: ${e.message?:"Action failed."}",failed=true)}
+                            currentCoroutineContext().ensureActive()
+                            withContext(Dispatchers.Main){
+                                if(currentGeneration==generation) {
+                                    steps=steps.map{if(it.id==step.id)it.copy(state=if(result.failed)"Failed"else "Done",output=result.output.take(16000))else it}
+                                    history.put(JSONObject().put("role","tool").put("tool_call_id",tool.getString("id")).put("content",result.output.take(16000)))
+                                    persist()
+                                }
+                            }
+                        }
+                        // A tool-only turn leaves the waiting placeholder blank; remove it so the tool rows stand alone.
+                        streamDraftId=null
+                        if(text.isBlank() && finalThought.isBlank()) withContext(Dispatchers.Main){if(currentGeneration==generation)messages=messages.filterNot{it.id==finishedDraft&&it.text.isBlank()&&it.thought.isBlank()}}
+                        turns++
+                        if(turns>=8) {
+                            withContext(Dispatchers.Main){if(currentGeneration==generation)messages=messages+Message("notice","Paused after 8 tool rounds. Send a follow-up to continue.")}
+                            completed=true
+                            return@withContext
+                        }
                     }
                 }
-                completed=true
             } catch (_: CancellationException) {
                 // Stop preserves any partial response.
             } catch (e: Exception) {
                 if (currentGeneration == generation) error = (if (e is IOException) e.message else null) ?: "Couldn’t read the provider response. Check your connection and try again."
             } finally {
+                draftFlushJob?.cancel()
+                draftFlushJob = null
                 if (currentGeneration == generation) {
-                    if (messages.lastOrNull()?.text?.isBlank() == true) messages = messages.dropLast(1)
+                    if (messages.lastOrNull()?.let{it.text.isBlank()&&it.thought.isBlank()} == true) messages = messages.dropLast(1)
                     finishResponseMetrics();responseStartedAt=-1L;responseTokens=null
-                    busy = false; call = null; persist()
+                    if(droppedTools)messages=messages+Message("notice","This model doesn't support tools, so Hydra answered without web tools.")
+                    busy = false; call = null; pendingQuestions = null; questionDecision = null; persist()
                     if(completed&&messages.count{it.role=="assistant"}==1) {
                         nameConversation(requestConversationId,requestEndpoint,requestKey,requestModel,selectedReasoning)
                     }
@@ -363,6 +488,88 @@ class HydraModel(app: Application) : AndroidViewModel(app) {
         return true
     }
 
+    /** Cut raw history back at the newest user prompt, dropping replies after it. */
+    private fun historyToLastPrompt(): String {
+        var last=-1
+        for(i in 0 until history.length())if(history.getJSONObject(i).optString("role")=="user")last=i
+        if(last<0)return ""
+        val out=JSONArray()
+        for(i in 0..last)out.put(history.getJSONObject(i))
+        return out.toString()
+    }
+
+    /** Replay this assistant answer, resending the same user prompt. */
+    fun regenerate(messageId: String): Boolean {
+        if(busy)return false
+        val index=messages.indexOfFirst { it.id==messageId && it.role=="assistant" }
+        if(index<0)return false
+        messages=messages.take(index)
+        val trimmed=historyToLastPrompt()
+        if(trimmed.isNotEmpty())history=JSONArray(trimmed)
+        return beginTurn()
+    }
+
+    /** Drop this assistant reply and everything after it, restoring the user prompt. */
+    fun revert(messageId: String): Boolean {
+        if(busy)return false
+        val index=messages.indexOfFirst { it.id==messageId && it.role=="assistant" }
+        if(index<0)return false
+        messages=messages.take(index)
+        val trimmed=historyToLastPrompt()
+        if(trimmed.isNotEmpty())history=JSONArray(trimmed)
+        persist();return true
+    }
+
+    /** Chat tools are read-only: research, the clock, and question wizards — never state changes. */
+    private suspend fun executeChatTool(name:String,args:JSONObject):WorkToolResult=when(name) {
+        "get_time"->WorkToolResult(ScheduleTools.currentTime())
+        "web_search"->withContext(Dispatchers.IO){WorkToolResult(web.search(args.getString("query"),SearchOptions.fromJson(args)))}
+        "web_search_batch"->withContext(Dispatchers.IO){
+            val queries=args.getJSONArray("queries")
+            WorkToolResult(web.searchBatch((0 until queries.length()).map{queries.getString(it)},SearchOptions.fromJson(args)))
+        }
+        "find_in_page"->withContext(Dispatchers.IO){WorkToolResult(web.find(args.getString("url"),args.getString("query"),args.optInt("max_matches",6)))}
+        "fetch_url"->withContext(Dispatchers.IO){WorkToolResult(web.fetch(args.getString("url"),args.optInt("max_chars",10000),args.optInt("offset",0)))}
+        "ask_user"->{
+            val request=QuestionTool.parse(args)
+            val answer=CompletableDeferred<String>()
+            questionDecision=answer;pendingQuestions=request
+            try{WorkToolResult(answer.await())}finally{
+                if(pendingQuestions?.id==request.id)pendingQuestions=null
+                questionDecision=null
+            }
+        }
+        else->WorkToolResult("Tool error: $name is not available in chat mode.",failed=true)
+    }
+
+    private fun chatSystemPrompt()="You are Hydra, a helpful, precise assistant running inside the Hydra app on the user's Android phone or tablet. This is chat mode: you cannot edit files or execute commands, so describe steps instead of claiming to run them, and never assume a desktop OS such as Windows or macOS. You have read-only tools for current information: web_search, web_search_batch, fetch_url, find_in_page, and get_time; cite retrieved source URLs and be honest when search fails or returns nothing. Use ask_user only when choices or missing information need the user's answer."
+
+    fun answerQuestions(id: String, answers: String?) {
+        val request = pendingQuestions?.takeIf { it.id == id } ?: return
+        val result = if (answers == null) {
+            JSONObject().put("status", "cancelled")
+                .put("instruction", "The user dismissed these questions. Do not repeat them without new instructions.")
+                .toString()
+        } else {
+            val response = JSONObject(answers)
+            require(
+                response.getString("status") == "answered" &&
+                    response.getJSONArray("answers").length() == request.questions.size
+            ) { "Invalid question response." }
+            val values = response.getJSONArray("answers")
+            require(
+                answers.length <= 15000 && (0 until values.length()).all { index ->
+                    val value = values.getJSONObject(index)
+                    val question = request.questions[index]
+                    value.getString("id") == question.id && QuestionTool.valid(question, value)
+                }
+            ) { "Question answers did not match the request." }
+            answers
+        }
+        questionDecision?.complete(result)
+        pendingQuestions = null
+    }
+
     private fun nameConversation(id:String,url:String,key:String,model:String,reasoning:ReasoningProfile) {
         val conversation=conversations.firstOrNull{it.id==id&&it.titleSource=="prompt"}?:return
         val prompt=conversation.messages.firstOrNull{it.role=="user"}?.text?:return
@@ -370,7 +577,8 @@ class HydraModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             try {
                 val title=ConversationNamer(client).generate(url,key,model,prompt,answer,reasoning)
-                if(title.isBlank())return@launch
+                // A model that cannot name the chat may answer `null` (or nothing): fall back to the first prompt.
+                if(title.isBlank()||title.equals("null",ignoreCase=true))return@launch
                 // Re-read after the network call: a rename, deletion, or another chat may have happened.
                 conversations=conversations.map{if(it.id==id&&it.titleSource=="prompt")it.copy(title=title,titleSource="ai")else it}
                 persistHistory()

@@ -13,6 +13,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.graphics.Brush
@@ -20,6 +21,11 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.tooling.preview.Preview
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.window.Popup
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.LayoutDirection
@@ -66,6 +72,39 @@ fun Modifier.verticalFadingEdges(surface: Color, edgeLength: Dp = 16.dp) = drawW
 
 data class ConversationRowUiState(val title: String, val selected: Boolean)
 
+/** The standard 3-dot overflow popup used across sidebar, task chat and schedule sheets. */
+
+/** Icon-only button that reveals a short hint when long-pressed. */
+@OptIn(ExperimentalFoundationApi::class)
+@Composable fun HintIconButton(hint:String,icon:ImageVector,onClick:()->Unit,modifier:Modifier=Modifier,
+    description:String=hint,onClickLabel:String=hint) {
+    val cs=MaterialTheme.colorScheme
+    var show by remember { mutableStateOf(false) }
+    LaunchedEffect(show){if(show){delay(1600);show=false}}
+    Box(modifier) {
+        Box(Modifier.size(48.dp).combinedClickable(onClick=onClick,onClickLabel=onClickLabel,onLongClick={show=true}),
+            contentAlignment=Alignment.Center){Icon(icon,description)}
+        if(show){
+            val density=LocalDensity.current
+            Popup(alignment=Alignment.TopCenter,offset=IntOffset(0,-with(density){8.dp.roundToPx()})){
+            Surface(color=cs.surfaceContainerHighest,shape=MaterialTheme.shapes.medium,shadowElevation=2.dp){
+                Text(hint,style=MaterialTheme.typography.labelMedium,color=cs.onSurface,modifier=Modifier.padding(horizontal=12.dp,vertical=8.dp))
+            }
+            }
+        }
+    }
+}
+
+@Composable fun HydraOverflowMenu(expanded:Boolean,onDismiss:()->Unit,headerText:String?=null,
+    content:@Composable androidx.compose.foundation.layout.ColumnScope.()->Unit) {
+    val cs=MaterialTheme.colorScheme
+    DropdownMenu(expanded=expanded,onDismissRequest=onDismiss,shape=MaterialTheme.shapes.large,containerColor=cs.surfaceContainerHigh) {
+        headerText?.let{header->Text(header,style=MaterialTheme.typography.labelLarge,color=cs.onSurfaceVariant,
+            modifier=Modifier.widthIn(max=280.dp).padding(horizontal=16.dp,vertical=12.dp))}
+        content()
+    }
+}
+
 @Composable fun MarqueeTitle(title: String, modifier: Modifier = Modifier, surface: Color = MaterialTheme.colorScheme.surface,
     style: TextStyle = MaterialTheme.typography.bodyLarge, color: Color = LocalContentColor.current,
     textAlign: TextAlign = TextAlign.Start) {
@@ -107,20 +146,19 @@ data class ConversationRowUiState(val title: String, val selected: Boolean)
             ListItem(
                 headlineContent = { MarqueeTitle(state.title, surface = color) },
                 leadingContent = { Icon(Icons.Outlined.ChatBubbleOutline, null) },
-                trailingContent = { IconButton(onClick = { menu = true }) { Icon(Icons.Outlined.MoreHoriz, "Conversation options") } },
+                trailingContent = {
+                    IconButton(onClick = { menu = true }) { Icon(Icons.Outlined.MoreHoriz, "Conversation options") }
+                    HydraOverflowMenu(expanded = menu, onDismiss = { menu = false }, headerText = state.title) {
+                        DropdownMenuItem(text = { Text("Rename") }, leadingIcon = { Icon(Icons.Outlined.Edit, null) }, onClick = { menu = false; onRename() })
+                        DropdownMenuItem(text = { Text("Export") }, leadingIcon = { Icon(Icons.Outlined.FileDownload, null) }, onClick = { menu = false; onExport() })
+                        DropdownMenuItem(text = { Text("Delete") }, leadingIcon = { Icon(Icons.Outlined.DeleteOutline, null) }, onClick = { menu = false; onDelete() })
+                    }
+                },
                 colors = ListItemDefaults.colors(containerColor = color,
                     headlineColor = if (state.selected) cs.onSecondaryContainer else cs.onSurface),
                 modifier = Modifier.semantics { selected = state.selected }.combinedClickable(
                     onClick = onOpen, onLongClickLabel = "Conversation options", onLongClick = { menu = true }),
             )
-        }
-        DropdownMenu(expanded = menu, onDismissRequest = { menu = false },
-            shape = MaterialTheme.shapes.large, containerColor = cs.surfaceContainerHigh) {
-            Text(state.title, style = MaterialTheme.typography.labelLarge, color = cs.onSurfaceVariant,
-                modifier = Modifier.widthIn(max = 280.dp).padding(horizontal = 16.dp, vertical = 12.dp))
-            DropdownMenuItem(text = { Text("Rename") }, leadingIcon = { Icon(Icons.Outlined.Edit, null) }, onClick = { menu = false; onRename() })
-            DropdownMenuItem(text = { Text("Export") }, leadingIcon = { Icon(Icons.Outlined.FileDownload, null) }, onClick = { menu = false; onExport() })
-            DropdownMenuItem(text = { Text("Delete") }, leadingIcon = { Icon(Icons.Outlined.DeleteOutline, null) }, onClick = { menu = false; onDelete() })
         }
     }
 }

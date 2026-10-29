@@ -3,6 +3,7 @@ package app.agentichydra
 import android.content.res.Configuration
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.*
@@ -14,6 +15,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.tooling.preview.Preview
@@ -31,6 +33,14 @@ data class HydraOrbitUiState(val visibleSatellites:Set<Int> = setOf(0,1,2))
     val phase=loop.animateFloat(0f,360f,infiniteRepeatable(tween(24_000,easing=LinearEasing)),label="Orbit angle")
     val pulse=loop.animateFloat(.94f,1.06f,infiniteRepeatable(tween(2200,easing=FastOutSlowInEasing),RepeatMode.Reverse),label="Hydra pulse")
     var state by remember { mutableStateOf(HydraOrbitUiState()) }
+    // Triple-tap easter egg: the illustration glows for a short moment.
+    var taps by remember { mutableIntStateOf(0) }
+    var glowing by remember { mutableStateOf(false) }
+    val glowScale by animateFloatAsState(if(glowing)1f else 0f,spring(dampingRatio=Spring.DampingRatioNoBouncy,stiffness=Spring.StiffnessLow),label="Glow")
+    LaunchedEffect(taps) {
+        if(taps>0){ delay(600); if(taps>=3) glowing=true; taps=0 }
+    }
+    LaunchedEffect(glowing){ if(glowing){ delay(1000); glowing=false } }
     LaunchedEffect(Unit) {
         val random=Random(System.nanoTime())
         while(true) {
@@ -40,10 +50,10 @@ data class HydraOrbitUiState(val visibleSatellites:Set<Int> = setOf(0,1,2))
             state=state.copy(visibleSatellites=if(index in visible&&visible.size>1)visible-index else visible+index)
         }
     }
-    HydraOrbitIllustration(state,{phase.value},{pulse.value},modifier)
+    HydraOrbitIllustration(state,{phase.value},{pulse.value},modifier.pointerInput(Unit){detectTapGestures(onTap={taps++})},glow={glowScale})
 }
 
-@Composable fun HydraOrbitIllustration(state:HydraOrbitUiState,phase:()->Float,pulse:()->Float,modifier:Modifier=Modifier) {
+@Composable fun HydraOrbitIllustration(state:HydraOrbitUiState,phase:()->Float,pulse:()->Float,modifier:Modifier=Modifier,glow:()->Float={0f}) {
   HydraOrbitTheme {
     val cs=MaterialTheme.colorScheme
     val icons=listOf(Icons.Outlined.Code,Icons.Outlined.Terminal,Icons.Outlined.AutoAwesome,Icons.Outlined.StarOutline)
@@ -68,11 +78,12 @@ data class HydraOrbitUiState(val visibleSatellites:Set<Int> = setOf(0,1,2))
             val dot=dotSize*(1f+(pulse()-1f)*4f)
             return dot+(sizes[index]-dot)*reveals[index].value
         }
-        Canvas(Modifier.fillMaxSize()) {
+        Canvas(Modifier.fillMaxSize().graphicsLayer {scaleX=1f+glow()*0.08f;scaleY=1f+glow()*0.08f}) {
             drawCircle(Brush.radialGradient(listOf(cs.primaryContainer,Color.Transparent),radius=size.minDimension*.48f*pulse()),radius=size.minDimension*.48f*pulse())
+            drawCircle(cs.primary,radius=size.minDimension*.62f*(glow()+.38f),alpha=.4f*glow())
             drawCircle(cs.outlineVariant,radius=size.minDimension*.38f,style=Stroke(1.dp.toPx()))
         }
-        HydraMark(Modifier.fillMaxSize(.42f).graphicsLayer {scaleX=pulse();scaleY=pulse()})
+        HydraMark(Modifier.fillMaxSize(.42f).graphicsLayer {val g=glow();val s=pulse()+(g*.04f);scaleX=s;scaleY=s})
         icons.forEachIndexed { index,icon ->
             Surface(color=fills[index],shape=MaterialTheme.shapes.large,modifier=Modifier.size(diameters[index]).graphicsLayer {
                 val angle=phase()

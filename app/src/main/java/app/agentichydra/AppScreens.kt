@@ -84,7 +84,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
         LazyColumn(Modifier.fillMaxSize().padding(padding).widthIn(max=840.dp),contentPadding=PaddingValues(16.dp),verticalArrangement=Arrangement.spacedBy(24.dp)){
             item{Row(Modifier.fillMaxWidth().padding(vertical=12.dp),verticalAlignment=Alignment.CenterVertically,horizontalArrangement=Arrangement.Center){HydraIllustration(Modifier.size(88.dp));Spacer(Modifier.width(12.dp));Text("Agentic Hydra",style=MaterialTheme.typography.hydraTitle)}}
             item{SettingsGroup {
-                SettingsEntry(Icons.Outlined.Hub,"Connections",Provider.entries.filter{!it.keyRequired||chat.savedKey(it).isNotBlank()}.map{it.label}.ifEmpty{listOf("None")}.joinToString(", ")){connections=true}
+                SettingsEntry(Icons.Outlined.Hub,"Connections",Provider.entries.filter{chat.savedKey(it).isNotBlank()}.map{it.label}.ifEmpty{listOf("None")}.joinToString(", ")){connections=true}
                 GroupDivider()
                 SettingsEntry(Icons.Outlined.Terminal,"Termux",if(allowed)"Connected"else "Set up"){page("termux")}
                 GroupDivider()
@@ -92,7 +92,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
             }}
             item{SettingsGroup {
                 SettingsEntry(Icons.Outlined.Contrast,"Appearance",appearanceState.themeMode.label){appearance=true}
-                GroupDivider();SettingsEntry(Icons.Outlined.Language,"Language","English")
+                GroupDivider();SettingsEntry(Icons.Outlined.Language,"Language","English"){page("language")}
                 GroupDivider();SettingsEntry(Icons.Outlined.PrivacyTip,"Privacy",null){page("privacy")}
                 GroupDivider();SettingsEntry(Icons.Outlined.Storage,"Storage",null){page("storage")}
                 GroupDivider();SettingsEntry(Icons.Outlined.Info,"Version","1.2.0"){page("about")}

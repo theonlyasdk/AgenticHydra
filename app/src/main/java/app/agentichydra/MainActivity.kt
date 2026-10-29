@@ -21,6 +21,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.NoteAdd
 import androidx.compose.material.icons.outlined.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -60,16 +61,19 @@ class MainActivity : ComponentActivity() {
         val splash=installSplashScreen()
         super.onCreate(savedInstanceState)
         splash.setOnExitAnimationListener { provider ->
-            if(!ValueAnimator.areAnimatorsEnabled())provider.remove()
-            else {
-                provider.iconView.apply {
-                    scaleX=1.25f;scaleY=1.25f
-                    animate().scaleX(1f).scaleY(1f).setDuration(220)
-                        .setInterpolator(DecelerateInterpolator()).start()
+            // Some hand-offs ship a splash view without an icon view; never crash on the cosmetic zoom.
+            runCatching {
+                if(!ValueAnimator.areAnimatorsEnabled())provider.remove()
+                else {
+                    provider.iconView.apply {
+                        scaleX=1.25f;scaleY=1.25f
+                        animate().scaleX(1f).scaleY(1f).setDuration(220)
+                            .setInterpolator(DecelerateInterpolator()).start()
+                    }
+                    provider.view.animate().alpha(0f).setStartDelay(140).setDuration(180)
+                        .setInterpolator(DecelerateInterpolator()).withEndAction { provider.remove() }.start()
                 }
-                provider.view.animate().alpha(0f).setStartDelay(140).setDuration(180)
-                    .setInterpolator(DecelerateInterpolator()).withEndAction { provider.remove() }.start()
-            }
+            }.onFailure { provider.remove() }
         }
         enableEdgeToEdge()
         setContent { HydraTheme { HydraApp() } }
@@ -177,11 +181,11 @@ class MainActivity : ComponentActivity() {
             topBar={
                 Column(Modifier.statusBarsPadding()) {
                     Row(Modifier.fillMaxWidth().padding(horizontal=12.dp,vertical=8.dp),verticalAlignment=Alignment.CenterVertically) {
-                        IconButton(onClick={scope.launch { drawer.open() }}) { Icon(Icons.Outlined.Menu,"Open chat history") }
+                        HintIconButton("Open chat history",Icons.Outlined.Menu,onClick={scope.launch { drawer.open() }})
                         Spacer(Modifier.width(8.dp))
                         Text("hydra",style=MaterialTheme.typography.hydraTitle)
                         Spacer(Modifier.weight(1f))
-                        IconButton(onClick={vm.newChat();draft=""}) { Icon(Icons.Outlined.Edit,"Start a new chat") }
+                        HintIconButton("Start a new chat",Icons.AutoMirrored.Outlined.NoteAdd,onClick={vm.newChat();draft=""})
                     }
                 }
             },bottomBar={
@@ -232,13 +236,23 @@ class MainActivity : ComponentActivity() {
                             val share=Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_TEXT,message.text)
                             runCatching{context.startActivity(Intent.createChooser(share,"Share response"))}
                                 .onFailure{scope.launch{snackbar.showSnackbar("Couldn’t open sharing.")}}
-                        },modifier=Modifier.widthIn(max=760.dp).fillMaxSize(),listState=listState)
+                        },toolContent={message,_,_->vm.steps.firstOrNull{it.id==message.id}?.let{WorkToolEntry(it,false){}}},
+                        trailingContent={
+                            if(vm.busy&&vm.messages.lastOrNull()?.role=="tool")Row(Modifier.padding(vertical=12.dp),verticalAlignment=Alignment.CenterVertically) {
+                                CircularProgressIndicator(Modifier.size(16.dp),strokeWidth=2.dp);Spacer(Modifier.width(12.dp))
+                                ShimmerStatusText("Working…",style=MaterialTheme.typography.bodyLarge,maxLines=2)
+                            }
+                        },modifier=Modifier.widthIn(max=760.dp).fillMaxSize(),listState=listState,
+                        messageActions=MessageLongPressActions(onCopy={message->clipboard.setText(AnnotatedString(message.text))},
+                            onRevert={message->vm.revert(message.id)},
+                            onRegenerate={message->vm.regenerate(message.id)}))
                 }
             }
         }
     }
     if(showConnection) ConnectionSheet(vm,onDismiss={showConnection=false})
     if(showModels) ModelPickerSheet(vm,onConnections={showModels=false;showConnection=true},onDismiss={showModels=false})
+    vm.pendingQuestions?.let{request->AgentQuestionSheet(request,{vm.answerQuestions(request.id,it)},{vm.answerQuestions(request.id,null)})}
     renameTarget?.let { target ->
         AlertDialog(onDismissRequest = { renameTarget = null }, title = { Text("Rename conversation") },
             text = { OutlinedTextField(value = renameTitle, onValueChange = { renameTitle = it },

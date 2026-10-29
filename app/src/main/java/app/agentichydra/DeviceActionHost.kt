@@ -36,7 +36,7 @@ import kotlinx.coroutines.CancellationException
         if(missing.isNotEmpty()) {
             if(!request.permissionLaunched){permissionRequestId=request.id;vm.markDevicePermissionLaunched(request.id);permission.launch(missing.toTypedArray())}
         }else{
-            try{vm.completeDeviceAction(request.id,DeviceTools.execute(activity,request.tool,org.json.JSONObject(request.arguments)))}
+            try{vm.completeDeviceAction(request.id,DeviceTools.execute(activity,request.tool,org.json.JSONObject(request.arguments),vm.projectFileSource()))}
             catch(e:CancellationException){throw e}
             catch(e:Exception){vm.completeDeviceAction(request.id,WorkToolResult("Tool error: ${e.message?:"Device action failed."}",failed=true))}
         }

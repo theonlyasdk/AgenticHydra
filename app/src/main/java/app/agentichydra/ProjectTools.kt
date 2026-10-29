@@ -8,6 +8,9 @@ import java.util.ArrayDeque
 
 data class WorkToolResult(val output:String,val changes:List<FileChange> = emptyList(),val failed:Boolean=false)
 
+/** A project image prepared for an agent's vision request. */
+data class ReadImage(val path:String,val mime:String,val base64:String,val bytes:Int)
+
 class ProjectTools(private val context:Context,private val root:DocumentFile) {
     fun resolve(path:String,create:Boolean=false):DocumentFile {
         val parts=ToolPolicy.parts(path)
@@ -15,7 +18,10 @@ class ProjectTools(private val context:Context,private val root:DocumentFile) {
         parts.forEachIndexed { index,name ->
             require(current.isDirectory){"A parent path is not a directory."}
             current=current.findFile(name)?:if(create) {
-                (if(index==parts.lastIndex)current.createFile("text/plain",name)else current.createDirectory(name))?:error("Could not create $name")
+                val mime=if(name.contains('.')&&name.substringAfterLast('.').isNotBlank()) {
+                    android.webkit.MimeTypeMap.getSingleton().getMimeTypeFromExtension(name.substringAfterLast('.').lowercase())?:"application/octet-stream"
+                } else "*/*"
+                (if(index==parts.lastIndex)current.createFile(mime,name)else current.createDirectory(name))?:error("Could not create $name")
             }else error("File not found: $path")
         }
         return current
@@ -33,6 +39,18 @@ class ProjectTools(private val context:Context,private val root:DocumentFile) {
         require(!text.contains('\u0000')){"This tool supports UTF-8 text and code files."}
         return text
     }
+    /** Loads a small project image as base64 for the agent's vision input. */
+    fun readImage(path:String):ReadImage {
+        val file=resolve(path)
+        require(file.isFile){"Choose a file, not a directory."}
+        val mime=(file.type?:"").lowercase()
+        require(mime in setOf("image/png","image/jpeg","image/webp","image/gif")){"Not a supported image file: $mime"}
+        val bytes=context.contentResolver.openInputStream(file.uri)?.use{stream->stream.readBytes()}?:error("Could not read file.")
+        require(bytes.size<=4194304){"Image exceeds 4 MB."}
+        val base64=android.util.Base64.encodeToString(bytes,android.util.Base64.NO_WRAP)
+        return ReadImage(path,mime,base64,bytes.size)
+    }
+
     private fun write(path:String,text:String):FileChange {
         require(ToolPolicy.parts(path).isNotEmpty()){"Choose a file path, not the project root."}
         require(text.toByteArray(Charsets.UTF_8).size<=262144&&!text.contains('\u0000')){"Use a UTF-8 file smaller than 256 KB."}
@@ -68,6 +86,11 @@ class ProjectTools(private val context:Context,private val root:DocumentFile) {
                 val entries=file.listFiles().sortedWith(compareBy<DocumentFile>{!it.isDirectory}.thenBy{it.name}).take(150)
                 WorkToolResult(formatProjectListing(entries.map{(it.name?:"?") to it.isDirectory}))
             }
+            "list_files_recursive"->{
+                val file=resolve(path);require(file.isDirectory){"Choose a directory."}
+                val results=walk(path).map{it.first}.sorted()
+                WorkToolResult(results.joinToString("\n").ifBlank{"No files in the scanned directories."}+"\n(Scan limit: 300 files; skips build/cache directories.)")
+            }
             "read_file"->WorkToolResult(read(args.getString("path")))
             "write_file"->{val change=write(args.getString("path"),args.getString("content"));WorkToolResult("Wrote ${change.path} (${change.after.length} characters).",listOf(change))}
             "append_file"->{val before=if(runCatching{resolve(path)}.isSuccess)read(path)else "";val change=write(path,before+args.getString("content"));WorkToolResult("Appended to $path.",listOf(change))}
@@ -80,6 +103,19 @@ class ProjectTools(private val context:Context,private val root:DocumentFile) {
                 require(all||matches==1){"Text matches more than once. Supply more context or set replace_all."}
                 val change=write(path,if(all)before.replace(old,replacement)else before.replaceFirst(old,replacement))
                 WorkToolResult("Replaced ${if(all)matches else 1} occurrence(s) in $path.",listOf(change))
+            }
+            "apply_diff"->{
+                val before=read(path)
+                val blocks=parseDiffBlocks(args.getString("diff"))
+                require(blocks.isNotEmpty()){"Add at least one SEARCH/REPLACE block."}
+                var after=before
+                blocks.forEachIndexed{index,block->
+                    val matches=Regex(Regex.escape(block.old)).findAll(after).count()
+                    require(matches==1){"SEARCH block ${index+1} matched ${if(matches==0)"nothing"else "more than one spot"}; add distinct surrounding lines."}
+                    after=after.replaceFirst(block.old,block.`new`)
+                }
+                val change=write(path,after)
+                WorkToolResult("Applied ${blocks.size} edit(s) to ${change.path}.",listOf(change))
             }
             "delete_file"->{val before=read(path);require(resolve(path).delete()){"Could not delete the file."};WorkToolResult("Deleted $path.",listOf(FileChange(path,before,"")))}
             "copy_file","move_file"->{
@@ -118,6 +154,31 @@ class ProjectTools(private val context:Context,private val root:DocumentFile) {
             else->error("Unknown project tool: $name")
         }
     }
+}
+
+internal data class DiffBlock(val old:String,val `new`:String)
+
+/** Parses ------- SEARCH / ======= / +++++++ REPLACE blocks from an apply_diff argument. */
+internal fun parseDiffBlocks(diff:String):List<DiffBlock> {
+    val blocks=mutableListOf<DiffBlock>()
+    var oldLines=StringBuilder();var newLines=StringBuilder();var phase=0
+    for(line in diff.lines()) {
+        val trimmed=line.trimEnd()
+        if(phase==0&&Regex("-+\\s*SEARCH").matches(trimmed)) {phase=1;continue}
+        if(phase==1&&Regex("=+\\s*(END)?").matches(trimmed)) {phase=2;continue}
+        if(phase==2&&Regex("\\++\\s*REPLACE").matches(trimmed)) {
+            require(oldLines.isNotBlank()){"SEARCH block must not be empty."}
+            blocks.add(DiffBlock(oldLines.toString(),newLines.toString()));phase=0
+            oldLines=StringBuilder();newLines=StringBuilder();continue
+        }
+        when(phase) {
+            1->{oldLines.append(trimmed);oldLines.append('\n')}
+            2->{newLines.append(trimmed);newLines.append('\n')}
+            else->{}
+        }
+    }
+    require(phase==0){"SEARCH/REPLACE block is incomplete; end every block with +++++++ REPLACE."}
+    return blocks
 }
 
 /** ls -F style names, sorted directories first, arranged in readable monospace columns. */

@@ -108,6 +108,21 @@ internal class TaskSchedules(private val context:Context) {
         val old=records.firstOrNull{it.id==id}?:error("Schedule not found.")
         val result=save(old.copy(state="Cancelled",revision=old.revision+1));manager.cancelAllWorkByTag("schedule:$id");return result
     }
+    fun delete(id:String) {
+        val old=records.firstOrNull{it.id==id}?:error("Schedule not found.")
+        records=records.filterNot{it.id==id}
+        prefs.edit().putString("records",org.json.JSONArray().apply{records.forEach{put(it.json())}}.toString()).commit()
+        manager.cancelAllWorkByTag("schedule:$id")
+    }
+    fun edit(id:String,title:String,prompt:String,runAt:Long):ScheduledTask {
+        val old=records.firstOrNull{it.id==id}?:error("Schedule not found.")
+        require(old.state!="Running"){"Cancel a running schedule before changing it."}
+        require(runAt>System.currentTimeMillis()){"Schedule a future time."}
+        val connection=old.connection
+        val updated=validated(old.copy(title=title,prompt=prompt,runAt=runAt,connection=connection,revision=old.revision+1,state="Scheduled",error=""))
+        require(old.state=="Scheduled"||records.count{it.state in setOf("Scheduled","Running")}<24){"At most 24 schedules can be active."}
+        save(updated);manager.cancelAllWorkByTag("schedule:${old.id}");enqueue(updated);return updated
+    }
     fun mark(record:ScheduledTask,state:String,error:String="")=save(record.copy(state=state,error=error))
     fun finish(record:ScheduledTask,outcome:String,error:String="") {
         val current=records.firstOrNull{it.id==record.id}?:return

@@ -8,6 +8,14 @@ import android.os.IBinder
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.launch
 import java.io.IOException
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
@@ -64,15 +72,46 @@ internal fun parseTermuxResult(bundle:android.os.Bundle?):TermuxResult {
 }
 
 class TaskService : Service() {
+    private var watcher: CoroutineScope? = null
     override fun onBind(intent: Intent?): IBinder? = null
     override fun onStartCommand(intent: Intent?,flags: Int,startId: Int): Int {
         val manager=getSystemService(NotificationManager::class.java)
         manager.createNotificationChannel(NotificationChannel("work","Agent tasks",NotificationManager.IMPORTANCE_LOW))
-        val open=PendingIntent.getActivity(this,0,Intent(this,WorkChatActivity::class.java).putExtra("conversationId",intent?.getStringExtra("conversationId")),PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
-        val notification=Notification.Builder(this,"work").setSmallIcon(R.drawable.hydra_monochrome)
-            .setContentTitle("Hydra is working").setContentText("Open Work to see progress or stop the agent.")
-            .setOngoing(true).setContentIntent(open).build()
-        startForeground(1,notification)
+        // Adopt the started conversation until a run owns the preview itself.
+        val conversationId=intent?.getStringExtra("conversationId")
+        if(conversationId!=null)TaskProgressPipe.update{it.copy(conversationId=conversationId)}
+        startForeground(1,render())
+        if(watcher==null) {
+            watcher=CoroutineScope(SupervisorJob()+Dispatchers.Main.immediate).also{scope->
+                scope.launch {
+                    val ticks=flow{while(true){emit(Unit);delay(1000)}}
+                    combine(TaskProgressPipe.live,ticks){live,_->render(live)}.collect{notification->manager.notify(1,notification)}
+                }
+            }
+        }
         return START_NOT_STICKY
+    }
+    override fun onDestroy() {
+        watcher?.cancel(); watcher = null
+        super.onDestroy()
+    }
+    private fun render(live: TaskProgressPipe.Live=TaskProgressPipe.live.value):Notification {
+        val open=PendingIntent.getActivity(this,0,Intent(this,WorkChatActivity::class.java).putExtra("conversationId",live.conversationId),PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
+        val title=live.title.ifBlank{"Hydra is working"}
+        val builder=Notification.Builder(this,"work").setSmallIcon(R.drawable.hydra_monochrome)
+            .setContentTitle(title).setContentIntent(open).setOngoing(true)
+        val body=if(live.running)live.headline.ifBlank{"Thinking…"}else "Task finished. Open to review the result."
+        builder.setContentText(body).setStyle(Notification.BigTextStyle().bigText(body))
+        if(live.running)builder.setSubText(elapsedLabel(live.startedElapsed))
+        return builder.build()
+    }
+    private fun elapsedLabel(startedElapsed: Long):String {
+        val seconds=((android.os.SystemClock.elapsedRealtime()-startedElapsed)/1000L).coerceAtLeast(1)
+        val minutes=seconds/60; val hours=minutes/60
+        return when {
+            hours>0 -> String.format("%d:%02d:%02d elapsed",hours,minutes%60,seconds%60)
+            minutes>0 -> String.format("%d:%02d elapsed",minutes,seconds%60)
+            else -> String.format("%ds elapsed",seconds)
+        }
     }
 }

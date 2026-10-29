@@ -42,7 +42,8 @@ class ConversationNamer(client:OkHttpClient) {
                 }
             })
         }
-        val content=JSONObject(body).getJSONArray("choices").getJSONObject(0).getJSONObject("message").getString("content")
+        val message=JSONObject(body).getJSONArray("choices").getJSONObject(0).getJSONObject("message")
+        val content=if(message.isNull("content"))"" else message.getString("content")
         return cleanConversationTitle(content)
     }
 }
@@ -51,3 +52,4 @@ internal fun cleanConversationTitle(content:String):String = content.substringAf
     .trim().lineSequence().firstOrNull { it.isNotBlank() }.orEmpty()
     .removePrefix("Title:").trim().trim('"','\'','`','#','*','“','”').trim()
     .replace(Regex("\\s+")," ").take(80).trim()
+    .let{if(it.equals("null",ignoreCase=true))"" else it}

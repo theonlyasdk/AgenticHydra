@@ -19,7 +19,7 @@ enum class ApprovalMode(val title:String,val detail:String) {
 }
 
 object ToolPolicy {
-    private val readTools=setOf("list_files","read_file","search_files","find_files","file_info","web_search","web_search_batch","fetch_url","find_in_page","get_time","wait_for","wait_until","list_scheduled_tasks")+DeviceTools.readOnly
+    private val readTools=setOf("list_files","list_files_recursive","read_file","search_files","find_files","file_info","web_search","web_search_batch","fetch_url","find_in_page","get_time","wait_for","wait_until","list_scheduled_tasks","read_task_output","read_image")+DeviceTools.readOnly
     fun parts(path:String):List<String> {
         require(!path.startsWith('/')&&!path.contains('\\')){"Use a relative project path."}
         val parts=path.split('/').filter{it.isNotEmpty()&&it!="."}

@@ -1,5 +1,9 @@
 package app.agentichydra
 
+import androidx.compose.foundation.ExperimentalFoundationApi
+
+import androidx.compose.foundation.combinedClickable
+
 import android.content.res.Configuration
 import android.text.format.DateFormat
 import android.text.format.DateUtils
@@ -10,7 +14,14 @@ import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.shrinkVertically
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
+import androidx.compose.foundation.clickable
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.unit.sp
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
@@ -20,6 +31,7 @@ import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.*
 import androidx.compose.material.icons.automirrored.outlined.ArrowForward
+import androidx.compose.material.icons.automirrored.outlined.Undo
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -40,6 +52,7 @@ import androidx.compose.ui.unit.Velocity
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.util.Date
 import java.util.Locale
@@ -58,11 +71,14 @@ internal fun chatTimeMarkerIds(messages:List<Message>):Set<String> {
     return markers
 }
 
+data class MessageLongPressActions(val onCopy: (Message) -> Unit, val onRevert: (Message) -> Unit, val onRegenerate: (Message) -> Unit)
+
 private data class TailLayout(
     val following: Boolean, val dragging: Boolean, val scrolling: Boolean, val count: Int,
     val lastIndex: Int, val lastBottom: Int, val viewportEnd: Int,
 )
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable fun ChatTimeline(
     state: ChatTimelineUiState,
     onCopy: (Message) -> Unit,
@@ -71,6 +87,7 @@ private data class TailLayout(
     listState: LazyListState = rememberLazyListState(),
     toolContent: (@Composable (Message,Int,Int)->Unit)? = null,
     trailingContent: (@Composable ()->Unit)? = null,
+    messageActions: MessageLongPressActions? = null,
 ) {
     var following by rememberSaveable(state.conversationId) { mutableStateOf(true) }
     val dragging by listState.interactionSource.collectIsDraggedAsState()
@@ -109,16 +126,17 @@ private data class TailLayout(
                 last?.index ?: -1, (last?.offset ?: 0) + (last?.size ?: 0), layout.viewportEndOffset)
         }.collect { tail ->
             if (tail.following && !tail.dragging && !tail.scrolling && tail.count > 0 && listState.canScrollForward) {
-                withFrameNanos { }
+                if (state.streamingResponseId == null) {
+                    withFrameNanos { }
+                }
                 if (following && !dragging && !listState.isScrollInProgress && listState.canScrollForward) {
-                    // Default scroll priority yields to a user gesture; no token-triggered restart.
-                    // A gesture cancels only this scroll child, leaving the follower alive.
-                    launch { listState.scrollToItem(listState.layoutInfo.totalItemsCount - 1) }.join()
+                    launch { listState.scrollToItem(listState.layoutInfo.totalItemsCount - 1, 100_000) }.join()
                 }
             }
         }
     }
 
+    var menuById by remember { mutableStateOf<String?>(null) }
     Box(modifier) {
         LazyColumn(state = listState,
             modifier = Modifier.fillMaxSize().nestedScroll(userScroll).testTag("chat-timeline"),
@@ -139,7 +157,18 @@ private data class TailLayout(
                             toolContent?.invoke(message,index-start,end-start+1)
                         }
                         "notice"->Text(message.text,style=MaterialTheme.typography.bodyMedium,color=MaterialTheme.colorScheme.onSurfaceVariant)
-                        else->ChatMessageContent(message, message.id == state.streamingResponseId, onCopy, onShare)
+                        else->Box(Modifier.fillMaxWidth()) {
+                            val prompt = remember(state.messages, message.id) {
+                                val idx = state.messages.indexOfFirst { it.id == message.id }
+                                if (idx > 0) state.messages[idx - 1].text else ""
+                            }
+                            Box(Modifier.combinedClickable(onClick={}, onLongClick={menuById=message.id})) {
+                                ChatMessageContent(message, message.id == state.streamingResponseId, onCopy, onShare, prompt)
+                            }
+                            MessageActionMenu(message, menuById==message.id, onCopy, messageActions,
+                                enabled=state.streamingResponseId!=message.id) { menuById=null }
+                        }
+
                     }
                 }
             }
@@ -219,7 +248,7 @@ private data class TailLayout(
     }
 }
 
-@Composable private fun ChatMessageContent(message: Message, streaming: Boolean, onCopy: (Message) -> Unit, onShare: (Message) -> Unit) {
+@Composable private fun ChatMessageContent(message: Message, streaming: Boolean, onCopy: (Message) -> Unit, onShare: (Message) -> Unit, prompt: String = "") {
     val cs = MaterialTheme.colorScheme
     if (message.role == "user") {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
@@ -235,20 +264,134 @@ private data class TailLayout(
         }
     } else {
         Column {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                HydraMark(Modifier.size(20.dp)); Spacer(Modifier.width(8.dp))
-                Text("HYDRA", style = MaterialTheme.typography.labelSmall, color = cs.primary)
+            if (message.finalResponse) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    HydraMark(Modifier.size(20.dp)); Spacer(Modifier.width(8.dp))
+                    Text("HYDRA", style = MaterialTheme.typography.labelSmall, color = cs.primary)
+                }
+                Spacer(Modifier.height(12.dp))
             }
-            Spacer(Modifier.height(12.dp))
-            if (message.text.isBlank()) {
+            if (message.text.isBlank() && message.thought.isBlank() && streaming) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
-                    Spacer(Modifier.width(12.dp)); ShimmerStatusText("Thinking…")
+                    Spacer(Modifier.width(8.dp))
+                    val initialThinking = remember(prompt) {
+                        if (prompt.isNotBlank()) ThinkingMessages.initialDescription(prompt) else "Thinking…"
+                    }
+                    val thinkingText by produceState(initialValue = initialThinking, key1 = prompt) {
+                        val iterator = ThinkingMessages.shuffledSequence().iterator()
+                        while (true) {
+                            delay(ThinkingMessages.CYCLE_INTERVAL_MS)
+                            value = iterator.next()
+                        }
+                    }
+                    ShimmerStatusText(thinkingText, style = MaterialTheme.typography.bodyMedium)
                 }
-            } else {
-                MarkdownBody(message.text)
-                if (!streaming) ResponseActions(message, onCopy = { onCopy(message) }, onShare = { onShare(message) })
             }
+            if (message.thought.isNotBlank()) {
+                val isThinking = streaming && message.text.isBlank()
+                val elapsed = message.metrics?.elapsedMillis
+                    ?: if (message.createdAt > 0L) (System.currentTimeMillis() - message.createdAt).coerceAtLeast(0L) else 0L
+                ReasoningBlock(
+                    thought = message.thought,
+                    isThinking = isThinking,
+                    elapsedMillis = elapsed
+                )
+            }
+            if (message.text.isNotBlank()) {
+                if (message.thought.isNotBlank()) Spacer(Modifier.height(8.dp))
+                MarkdownBody(message.text)
+                if (!streaming && message.finalResponse) ResponseActions(message, onCopy = { onCopy(message) }, onShare = { onShare(message) })
+            }
+        }
+    }
+}
+
+@Composable fun ReasoningBlock(
+    thought: String,
+    isThinking: Boolean,
+    elapsedMillis: Long = 0L,
+    modifier: Modifier = Modifier
+) {
+    if (thought.isBlank() && !isThinking) return
+    val cs = MaterialTheme.colorScheme
+    var expanded by rememberSaveable { mutableStateOf(false) }
+    val angle by animateFloatAsState(
+        targetValue = if (expanded) 90f else 0f,
+        animationSpec = spring(stiffness = 500f),
+        label = "Thought chevron"
+    )
+
+    Column(modifier = modifier.fillMaxWidth()) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier
+                .heightIn(min = 48.dp)
+                .clickable { expanded = !expanded }
+                .semantics {
+                    contentDescription = if (expanded) "Collapse thought" else "Expand thought"
+                }
+        ) {
+            if (isThinking) {
+                ShimmerStatusText("Thinking", style = MaterialTheme.typography.labelLarge)
+            } else {
+                val sec = (elapsedMillis / 1000L).toInt()
+                val label = if (sec > 0) "Thought for ${sec}s" else "Thought"
+                Text(label, style = MaterialTheme.typography.labelLarge, color = cs.onSurfaceVariant)
+            }
+            Spacer(Modifier.width(4.dp))
+            Icon(
+                Icons.Outlined.ChevronRight,
+                contentDescription = null,
+                tint = cs.onSurfaceVariant,
+                modifier = Modifier
+                    .size(16.dp)
+                    .graphicsLayer { rotationZ = angle }
+            )
+        }
+        AnimatedVisibility(
+            visible = expanded,
+            enter = fadeIn(spring(stiffness = 500f)) + expandVertically(spring(stiffness = 500f)),
+            exit = fadeOut(spring(stiffness = 500f)) + shrinkVertically(spring(stiffness = 500f))
+        ) {
+            val outline = cs.outlineVariant
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(start = 4.dp, top = 2.dp, bottom = 8.dp)
+                    .drawBehind {
+                        drawLine(
+                            color = outline,
+                            start = Offset(0f, 0f),
+                            end = Offset(0f, size.height),
+                            strokeWidth = 2.dp.toPx()
+                        )
+                    }
+                    .padding(start = 12.dp)
+            ) {
+                SelectionContainer {
+                    Text(
+                        text = thought.ifBlank { "Thinking in progress…" },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = cs.onSurfaceVariant,
+                        lineHeight = 18.sp
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable private fun MessageActionMenu(message: Message, expanded: Boolean, onCopy: (Message) -> Unit,
+    actions: MessageLongPressActions? = null, enabled: Boolean = true, onDismiss: () -> Unit) {
+    val cs=MaterialTheme.colorScheme
+    DropdownMenu(expanded=expanded,onDismissRequest=onDismiss,shape=MaterialTheme.shapes.large,containerColor=cs.surfaceContainerHigh) {
+        DropdownMenuItem(text={Text("Copy")},leadingIcon={Icon(Icons.Outlined.ContentCopy,null)},onClick={onDismiss();onCopy(message)})
+        if(message.role=="assistant"&&actions!=null) {
+            DropdownMenuItem(text={Text("Regenerate")},leadingIcon={Icon(Icons.Outlined.Refresh,null)},enabled=enabled,
+                onClick={onDismiss();actions.onRegenerate(message)})
+            DropdownMenuItem(text={Text("Revert")},leadingIcon={Icon(Icons.AutoMirrored.Outlined.Undo,null)},enabled=enabled,
+                onClick={onDismiss();actions.onRevert(message)})
         }
     }
 }
@@ -283,8 +426,23 @@ private data class TailLayout(
     HydraTheme { Surface { ChatTimeline(ChatTimelineUiState("preview", listOf(
         Message("user", "Explain this project’s architecture.", createdAt = time),
         Message("assistant", "The app separates Chat, Work, and User settings. Provider access is shared across Chat and Work.",
-            createdAt = time, metrics = ResponseMetrics(32, 1600, false, time + 1600)),
+            createdAt = time, metrics = ResponseMetrics(32, 1600, false, time + 1600),
+            thought = "The user is asking about the project architecture. I should break it down into Chat, Work, and User settings, and clarify how provider access is shared."),
         Message("model", "Project assistant", createdAt = time + 60000, modelName = "Project assistant", providerName = "NVIDIA NIM",
             previousModelName="Code assistant",previousProviderName="Gemini"),
     )), {}, {}, Modifier.fillMaxSize()) } }
+}
+
+@Preview(name = "Reasoning block light")
+@Preview(name = "Reasoning block dark", uiMode = Configuration.UI_MODE_NIGHT_YES)
+@Preview(name = "Reasoning block large text", fontScale = 1.5f)
+@Composable private fun ReasoningBlockPreview() {
+    HydraTheme {
+        Surface {
+            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                ReasoningBlock(thought = "Active thought stream...", isThinking = true)
+                ReasoningBlock(thought = "Analyzed user query, retrieved project history, determined next step.", isThinking = false, elapsedMillis = 3500L)
+            }
+        }
+    }
 }

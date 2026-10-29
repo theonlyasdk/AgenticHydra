@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Serves file:/// open requests to viewers as read-only content URIs. -->
+<paths>
+    <external-path name="shared-storage" path="." />
+    <files-path name="app-files" path="." />
+    <cache-path name="app-cache" path="." />
+    <external-files-path name="app-external-files" path="." />
+    <external-cache-path name="app-external-cache" path="." />
+</paths>

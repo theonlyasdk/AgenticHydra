@@ -22,4 +22,27 @@ class ChatMessageMetadataTest {
             previousModelId="custom/original",previousModelName="Original model",previousProviderName="Ollama")
         assertEquals(marker,Message.fromJson(marker.json()))
     }
+    @Test fun thoughtSurvivesHistorySerialization() {
+        val message = Message("assistant", "Result text", thought = "Thinking step by step...")
+        val restored = Message.fromJson(message.json())
+        assertEquals("Thinking step by step...", restored.thought)
+        assertEquals("Result text", restored.text)
+    }
+    @Test fun extractThoughtHandlesRawAndTags() {
+        val (text1, thought1) = extractThought("<think>\nMy thoughts\n</think>\nActual text", "")
+        assertEquals("Actual text", text1)
+        assertEquals("My thoughts", thought1)
+
+        val (text2, thought2) = extractThought("Actual text", "Provided reasoning")
+        assertEquals("Actual text", text2)
+        assertEquals("Provided reasoning", thought2)
+
+        val (text3, thought3) = extractThought("   <think>Thinking without close", "")
+        assertEquals("", text3)
+        assertEquals("Thinking without close", thought3)
+
+        val (text4, thought4) = extractThought("Code with <think> tag inside", "")
+        assertEquals("Code with <think> tag inside", text4)
+        assertEquals("", thought4)
+    }
 }

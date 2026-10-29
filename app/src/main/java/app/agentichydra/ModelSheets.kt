@@ -73,46 +73,74 @@ import kotlinx.coroutines.delay
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable fun ModelPickerSheet(vm: HydraModel,onConnections:()->Unit,onDismiss:()->Unit) {
     val cs=MaterialTheme.colorScheme
-    var query by rememberSaveable(vm.provider) {mutableStateOf("")}
-    var manual by rememberSaveable(vm.provider) {mutableStateOf(false)}
-    var manualId by rememberSaveable(vm.provider) {mutableStateOf("")}
+    // Provider and model choices stay local drafts until Done commits them, so
+    // browsing never rewrites the live connection or drops model-change markers into the chat.
+    var draftProvider by rememberSaveable { mutableStateOf(vm.provider) }
+    var draftModel by rememberSaveable { mutableStateOf(vm.model) }
+    var draftManualPicked by rememberSaveable(draftProvider) { mutableStateOf(false) }
+    var query by rememberSaveable(draftProvider) {mutableStateOf("")}
+    var manual by rememberSaveable(draftProvider) {mutableStateOf(false)}
+    var manualId by rememberSaveable(draftProvider) {mutableStateOf("")}
+    val draftModels=remember(draftProvider,vm.models,vm.discovering){
+        if(draftProvider==vm.provider)vm.models else vm.cachedCatalog(draftProvider)
+    }
+    val draftSpec=draftModels.firstOrNull{it.id==draftModel}?:ModelSpec(draftModel)
+    val draftReasoning=ReasoningPolicy.profile(draftProvider,draftSpec)
+    var draftEffort by remember(draftProvider,draftModel){mutableStateOf(vm.savedEffort(draftProvider,draftModel))}
     val pendingManual=manual&&manualId.isNotBlank()
-    val availability=ModelPickerAvailabilityUiState(vm.provider,vm.apiKey.isNotBlank(),vm.models.isNotEmpty(),vm.customModelSelected||pendingManual)
-    val filtered=remember(vm.models,query,availability.needsConnection) {
-        if(availability.needsConnection)emptyList()else vm.models.filter{it.id.contains(query,true)||it.name.contains(query,true)||it.owner.contains(query,true)}
+    val customSelected=if(draftProvider==vm.provider)vm.customModelSelected&&draftModel==vm.model else vm.manualSelection(draftProvider,draftModel)
+    val availability=ModelPickerAvailabilityUiState(draftProvider,vm.savedKey(draftProvider).isNotBlank(),draftModels.isNotEmpty(),customSelected||pendingManual)
+    val filtered=remember(draftModels,query,availability.needsConnection) {
+        if(availability.needsConnection)emptyList()else draftModels.filter{it.id.contains(query,true)||it.name.contains(query,true)||it.owner.contains(query,true)}
     }
     val keyboard=LocalSoftwareKeyboardController.current
     val clipboard=LocalClipboardManager.current
     var copyTarget by remember { mutableStateOf<ModelSpec?>(null) }
-    val modelListState=rememberLazyListState(initialFirstVisibleItemIndex=filtered.indexOfFirst{it.id==vm.model}.coerceAtLeast(0))
+    val modelListState=rememberLazyListState(initialFirstVisibleItemIndex=filtered.indexOfFirst{it.id==draftModel}.coerceAtLeast(0))
     val keyboardOpen=WindowInsets.ime.getBottom(LocalDensity.current)>0
-    LaunchedEffect(vm.provider){
+    LaunchedEffect(draftProvider){
         delay(350)
-        if(!vm.discovering&&(vm.models.isEmpty()||System.currentTimeMillis()-vm.catalogUpdated>300_000))vm.refreshModels()
+        if(vm.discovering)return@LaunchedEffect
+        val stale=if(draftProvider==vm.provider)vm.models.isEmpty()||System.currentTimeMillis()-vm.catalogUpdated>300_000
+            else vm.cachedCatalog(draftProvider).isEmpty()||vm.catalogAge(draftProvider)>300_000
+        if(stale)vm.refreshModels(draftProvider)
+    }
+    fun applyDraft() {
+        val manualEntry=manual&&manualId.isNotBlank()
+        if(manualEntry)draftModel=manualId.trim()
+        val model=draftModel.trim()
+        val manualChoice=draftManualPicked||manualEntry
+        if(draftProvider!=vm.provider)
+            vm.configure(draftProvider,vm.savedEndpoint(draftProvider),model.ifBlank{vm.savedModel(draftProvider)},vm.savedKey(draftProvider))
+        if(model.isNotBlank()&&(manualChoice||model!=vm.model))vm.chooseModel(model,manual=manualChoice)
+        vm.chooseEffort(draftEffort)
     }
     var connectionsAfterDismiss by remember { mutableStateOf(false) }
-    HydraBottomSheet(onDismiss={if(connectionsAfterDismiss)onConnections()else onDismiss()},containerColor=cs.surfaceContainerLow) { dismiss ->
-        val connect = { if(pendingManual)vm.chooseModel(manualId,manual=true);connectionsAfterDismiss=true; dismiss() }
+    HydraBottomSheet(onDismiss={if(connectionsAfterDismiss)onConnections()else onDismiss()},containerColor=cs.surfaceContainerLow,lock=true,heading={ close ->
+        Row(Modifier.fillMaxWidth().padding(horizontal=16.dp).testTag("models-header"),verticalAlignment=Alignment.CenterVertically) {
+            Icon(Icons.Outlined.AutoAwesome,null,tint=cs.primary)
+            Spacer(Modifier.width(12.dp))
+            Text("Models",style=MaterialTheme.typography.titleLarge,modifier=Modifier.weight(1f))
+            IconButton(onClick={vm.refreshModels(draftProvider)},enabled=!vm.discovering&&!availability.needsConnection){Icon(Icons.Outlined.Refresh,"Refresh models")}
+            IconButton(onClick={applyDraft();connectionsAfterDismiss=true;close()}){Icon(Icons.Outlined.Tune,"Provider connections")}
+        }
+    }) { dismiss ->
+        val connect = { applyDraft();connectionsAfterDismiss=true; dismiss() }
         Column(Modifier.fillMaxWidth().imePadding()) {
-            Row(Modifier.fillMaxWidth().padding(horizontal=16.dp).testTag("models-header"),verticalAlignment=Alignment.CenterVertically) {
-                Icon(Icons.Outlined.AutoAwesome,null,tint=cs.primary)
-                Spacer(Modifier.width(12.dp))
-                Text("Models",style=MaterialTheme.typography.titleLarge,modifier=Modifier.weight(1f))
-                IconButton(onClick={vm.refreshModels()},enabled=!vm.discovering&&!availability.needsConnection){Icon(Icons.Outlined.Refresh,"Refresh models")}
-                IconButton(onClick=connect){Icon(Icons.Outlined.Tune,"Provider connections")}
-            }
           Column(Modifier.fillMaxWidth().weight(1f,fill=false).sheetContentScrollOnly().padding(horizontal=16.dp)) {
             Spacer(Modifier.height(8.dp))
-            ProviderChoices(vm.provider,onSelect={p->vm.switchProvider(p);query=""})
+            ProviderChoices(draftProvider,onSelect={p->
+                if(p!=draftProvider){draftProvider=p;draftModel=vm.savedModel(p);draftManualPicked=false;query="";manual=false;manualId=""}
+            })
             if(availability.showSearch)SearchBar(inputField={SearchBarDefaults.InputField(query=query,onQueryChange={query=it},onSearch={keyboard?.hide()},expanded=false,onExpandedChange={},
                 placeholder={Text("Search models")},leadingIcon={Icon(Icons.Outlined.Search,null)})},expanded=false,onExpandedChange={},
                 shape=MaterialTheme.shapes.extraLarge,windowInsets=WindowInsets(0),modifier=Modifier.fillMaxWidth().padding(top=8.dp)){}
             if(vm.discovering&&!availability.needsConnection)LinearProgressIndicator(Modifier.fillMaxWidth())
-            if(availability.hasModels&&!availability.needsConnection)vm.discoveryError?.let{error->
+            if(availability.hasModels&&!availability.needsConnection&&draftProvider==vm.provider)vm.discoveryError?.let{error->
                 Row(Modifier.fillMaxWidth().padding(vertical=8.dp),verticalAlignment=Alignment.CenterVertically){Icon(Icons.Outlined.Info,null,Modifier.size(20.dp),tint=cs.primary);Spacer(Modifier.width(8.dp));Text(error,style=MaterialTheme.typography.bodyMedium,modifier=Modifier.weight(1f))}
             }
-            LaunchedEffect(vm.provider,vm.model,query,filtered) {
-                val index=filtered.indexOfFirst{it.id==vm.model}
+            LaunchedEffect(draftProvider,draftModel,query,filtered) {
+                val index=filtered.indexOfFirst{it.id==draftModel}
                 if(index>=0) {
                     val layout=modelListState.layoutInfo
                     val selected=layout.visibleItemsInfo.firstOrNull{it.index==index}
@@ -124,20 +152,20 @@ import kotlinx.coroutines.delay
                 state=modelListState,
                 contentPadding=PaddingValues(top=if(availability.showSearch)24.dp else 12.dp,bottom=24.dp)) {
                 if(availability.needsConnection)item {
-                    ModelPickerEmptyState(ModelPickerEmptyUiState("Add a ${vm.provider.label} API key",needsKey=true))
+                    ModelPickerEmptyState(ModelPickerEmptyUiState("Add a ${draftProvider.label} API key",needsKey=true))
                 } else if(filtered.isEmpty()) item {
                     ModelPickerEmptyState(ModelPickerEmptyUiState(
                         if(vm.discovering)"Loading models…" else if(query.isBlank()||!availability.hasModels)"No models loaded" else "No matching models",
-                        detail=if(!availability.hasModels&&!vm.discovering)vm.discoveryError else null))
+                        detail=if(draftProvider==vm.provider&&!vm.discovering)vm.discoveryError else null))
                 }
                 itemsIndexed(filtered,key={_,m->m.id}){index,m->
-                    val selected=vm.model==m.id
+                    val selected=draftModel==m.id
                     val rowColor=if(selected)cs.primaryContainer else cs.surfaceContainerHigh
                     Surface(shape=groupedRowShape(index,filtered.size),color=rowColor,modifier=Modifier.fillMaxWidth().padding(bottom=4.dp).semantics{this.selected=selected}
-                        .combinedClickable(onClick={vm.chooseModel(m.id);keyboard?.hide()},onLongClickLabel="Copy model name",onLongClick={copyTarget=m})) {
+                        .combinedClickable(onClick={draftModel=m.id;draftManualPicked=false;manual=false;keyboard?.hide()},onLongClickLabel="Copy model name",onLongClick={copyTarget=m})) {
                         ListItem(headlineContent={MarqueeTitle(m.name,surface=rowColor)},
                             supportingContent={if(m.name!=m.id)MarqueeTitle(m.id,surface=rowColor,style=MaterialTheme.typography.labelMedium)},
-                            leadingContent={BrandIcon(m.id,vm.provider,Modifier.size(24.dp))},
+                            leadingContent={BrandIcon(m.id,draftProvider,Modifier.size(24.dp))},
                             trailingContent={if(selected)Icon(Icons.Outlined.Check,"Selected",tint=cs.onPrimaryContainer)},
                             colors=ListItemDefaults.colors(containerColor=rowColor,headlineColor=if(selected)cs.onPrimaryContainer else cs.onSurface,
                                 supportingColor=if(selected)cs.onPrimaryContainer else cs.onSurfaceVariant))
@@ -147,11 +175,11 @@ import kotlinx.coroutines.delay
             TextButton(onClick={manual=!manual},modifier=Modifier.fillMaxWidth().heightIn(min=48.dp)){Icon(Icons.Outlined.Edit,null,Modifier.size(18.dp));Spacer(Modifier.width(8.dp));Text("Enter model ID")}
             AnimatedVisibility(visible=manual,enter=slideInVertically(tween(140,easing=LinearOutSlowInEasing)){it/2}+fadeIn(tween(100)),
                 exit=slideOutVertically(tween(90,easing=LinearOutSlowInEasing)){it/2}+fadeOut(tween(80))){
-                Row(verticalAlignment=Alignment.CenterVertically){OutlinedTextField(value=manualId,onValueChange={manualId=it},label={Text("Model ID")},modifier=Modifier.weight(1f),singleLine=true,shape=MaterialTheme.shapes.medium);IconButton(onClick={vm.chooseModel(manualId,manual=true);manual=false;keyboard?.hide()},enabled=manualId.isNotBlank()){Icon(Icons.Outlined.Check,"Use model ID")}}
+                Row(verticalAlignment=Alignment.CenterVertically){OutlinedTextField(value=manualId,onValueChange={manualId=it},label={Text("Model ID")},modifier=Modifier.weight(1f),singleLine=true,shape=MaterialTheme.shapes.medium);IconButton(onClick={draftModel=manualId.trim();draftManualPicked=true;manual=false;keyboard?.hide()},enabled=manualId.isNotBlank()){Icon(Icons.Outlined.Check,"Use model ID")}}
             }
-            if(!availability.needsConnection&&!keyboardOpen&&vm.reasoning.available)ReasoningControl(vm)
+            if(!availability.needsConnection&&!keyboardOpen&&draftReasoning.available)ReasoningControl(draftReasoning,draftEffort){draftEffort=it}
 
-            Button(onClick={if(availability.needsConnection)connect()else{if(pendingManual)vm.chooseModel(manualId,manual=true);dismiss()}},
+            Button(onClick={if(availability.needsConnection)connect()else{applyDraft();dismiss()}},
                 enabled=availability.needsConnection||availability.canFinish,shape=MaterialTheme.shapes.extraLarge,
                 modifier=Modifier.fillMaxWidth().padding(top=8.dp,bottom=24.dp).heightIn(min=52.dp)){Text(if(availability.needsConnection)"Connect" else "Done")}
           }
@@ -226,8 +254,8 @@ data class ReasoningSelectorUiState(val levels:List<String>,val selected:String)
     return large.copy(topStart=if(index==0)large.topStart else small.topStart,topEnd=if(index==0)large.topEnd else small.topEnd,
         bottomStart=if(index==count-1)large.bottomStart else small.bottomStart,bottomEnd=if(index==count-1)large.bottomEnd else small.bottomEnd)
 }
-@Composable fun ReasoningControl(vm:HydraModel){
-    ReasoningSelector(ReasoningSelectorUiState(listOf("auto")+vm.reasoning.levels,vm.effort),vm::chooseEffort)
+@Composable fun ReasoningControl(profile:ReasoningProfile,effort:String,onSelect:(String)->Unit){
+    ReasoningSelector(ReasoningSelectorUiState(listOf("auto")+profile.levels,effort),onSelect)
 }
 
 @OptIn(ExperimentalMaterial3Api::class)

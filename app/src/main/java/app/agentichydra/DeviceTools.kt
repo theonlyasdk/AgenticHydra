@@ -39,6 +39,13 @@ import kotlin.math.roundToInt
 
 data class DeviceActionRequest(val tool:String,val arguments:String,val id:String=UUID.randomUUID().toString(),val permissionLaunched:Boolean=false)
 
+/** Lets device actions read a file from the selected SAF project without a raw-path permission. */
+internal interface ProjectFileSource {
+    val directory:String
+    /** Opens the file at a real-path-derived relative location, or null when it does not exist. */
+    fun open(relativePath:String):java.io.InputStream?
+}
+
 object DeviceTools {
     val names=listOf("device_info","battery_info","storage_info","network_info","display_info","audio_info","set_volume",
         "set_flashlight","vibrate","list_apps","open_app","open_url","open_settings","set_screen_brightness","get_location",
@@ -60,10 +67,14 @@ object DeviceTools {
             tool("set_volume","Change media or alarm volume. Requires tool approval according to the selected policy.",listOf("stream","percent"),
                 "stream" to str("Audio stream.").put("enum",JSONArray(listOf("media","alarm"))),"percent" to integerSchema("Volume percentage.",0,100)),
             tool("set_flashlight","Turn the phone flashlight on or off. Requires available hardware; controls torch mode without opening the camera or taking photos.",listOf("enabled"),"enabled" to booleanSchema("True to turn on; false to turn off.")),
-            tool("vibrate","Vibrate briefly, at most two seconds.",listOf("milliseconds"),"milliseconds" to integerSchema("Vibration duration.",1,2000)),
+            tool("vibrate","Vibrate the device. Duration 1-2000 ms; optional delay before starting, repeat count, and gap between repeats.",listOf("milliseconds"),
+                "milliseconds" to integerSchema("Vibration duration.",1,2000),
+                "delay_ms" to integerSchema("Delay before the first vibration.",0,5000),
+                "repeat" to integerSchema("Number of additional vibrations after the first.",0,10),
+                "gap_ms" to integerSchema("Gap between repeated vibrations.",0,2000)),
             tool("list_apps","List up to 100 launchable apps visible to Hydra, optionally filtered by label or package. No private app data.",emptyList(),"query" to str("Optional name or package filter, up to 100 characters.")),
             tool("open_app","Open a launchable Android app by its exact package name. Use list_apps to discover names.",listOf("package"),"package" to str("Android package name, e.g. com.termux.")),
-            tool("open_url","Open an HTTP or HTTPS URL in the user's browser. This does not read browser tabs or history.",listOf("url"),"url" to str("URL without embedded credentials.")),
+            tool("open_url","Open an HTTP(S) page, a file:/// path stored in shared storage or Hydra's own folders, or an app deep link such as youtube:// or instagram:// in the app that handles it. This does not read browser tabs or history.",listOf("url"),"url" to str("URL without embedded credentials, a file:/// path, or an app deep link.")),
             tool("open_settings","Open an Android settings page so the user can make a change. Does not silently change system settings.",listOf("page"),"page" to str("Settings page.").put("enum",JSONArray(listOf("wifi","bluetooth","location","sound","display","battery","app")))),
             tool("set_screen_brightness","Change brightness only for the current Hydra task window. Does not change global system brightness.",emptyList(),"percent" to integerSchema("Window brightness, default 50.",1,100),"use_system_default" to booleanSchema("Reset the Hydra window to system brightness.")),
             tool("get_location","Get one approximate foreground location with Android permission. Only use when the user requests location-dependent help. Times out after 15 seconds; no background tracking."),
@@ -77,7 +88,7 @@ object DeviceTools {
     }
 
     @Suppress("DEPRECATION")
-    suspend fun execute(activity:Activity,name:String,args:JSONObject):WorkToolResult {
+    internal suspend fun execute(activity:Activity,name:String,args:JSONObject,project:ProjectFileSource?=null):WorkToolResult {
         require(name in names){"Unknown device tool."}
         check(missingPermissions(activity,name).isEmpty()){"Android permission was not granted. Do not retry without the user's instruction."}
         val result=when(name) {
@@ -112,8 +123,20 @@ object DeviceTools {
                 manager.setTorchMode(camera,args.getBoolean("enabled"));JSONObject().put("flashlight_enabled",args.getBoolean("enabled"))
             }
             "vibrate"->{val duration=args.getInt("milliseconds");require(duration in 1..2000){"Use a duration from 1 to 2,000 milliseconds."}
+                val delay=args.optInt("delay_ms",0).coerceIn(0,5000)
+                val repeat=args.optInt("repeat",0).coerceIn(0,10)
+                val gap=args.optInt("gap_ms",0).coerceIn(0,2000)
                 val vibrator=activity.getSystemService(Vibrator::class.java);check(vibrator.hasVibrator()){"This device has no vibrator."}
-                vibrator.vibrate(VibrationEffect.createOneShot(duration.toLong(),VibrationEffect.DEFAULT_AMPLITUDE));JSONObject().put("vibrated_ms",duration)}
+                val timings=buildList {
+                    add(delay.toLong())
+                    repeat(repeat+1) {
+                        if(it>0) add(gap.toLong())
+                        add(duration.toLong())
+                    }
+                }.toLongArray()
+                val effect=VibrationEffect.createWaveform(timings,-1)
+                vibrator.vibrate(effect)
+                JSONObject().put("vibrated_ms",duration).put("delay_ms",delay).put("repeat",repeat).put("gap_ms",gap)}
             "list_apps"->{
                 val query=args.optString("query").also{require(it.length<=100)}
                 val apps=activity.packageManager.queryIntentActivities(Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER),0)
@@ -123,7 +146,7 @@ object DeviceTools {
             }
             "open_app"->{val pkg=args.getString("package");require(pkg.matches(Regex("[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z0-9_]+)+"))){"Use an exact package name."}
                 launch(activity,activity.packageManager.getLaunchIntentForPackage(pkg)?:error("This app is not installed or has no visible launcher."))}
-            "open_url"->{val uri=Uri.parse(args.getString("url"));require(uri.scheme in setOf("https","http")&&!uri.host.isNullOrBlank()&&uri.userInfo==null&&uri.toString().length<=2048){"Use an HTTP(S) URL without credentials."};launch(activity,Intent(Intent.ACTION_VIEW,uri))}
+            "open_url"->openUri(activity,args.getString("url"),project)
             "open_settings"->{val action=when(args.getString("page")){"wifi"->Settings.ACTION_WIFI_SETTINGS;"bluetooth"->Settings.ACTION_BLUETOOTH_SETTINGS;"location"->Settings.ACTION_LOCATION_SOURCE_SETTINGS;"sound"->Settings.ACTION_SOUND_SETTINGS;"display"->Settings.ACTION_DISPLAY_SETTINGS;"battery"->Intent.ACTION_POWER_USAGE_SUMMARY;"app"->Settings.ACTION_APPLICATION_DETAILS_SETTINGS;else->error("Unsupported settings page.")}
                 launch(activity,Intent(action).apply{if(action==Settings.ACTION_APPLICATION_DETAILS_SETTINGS)data=Uri.parse("package:${activity.packageName}")})}
             "set_screen_brightness"->{val reset=args.optBoolean("use_system_default");val percent=args.optInt("percent",50);require(reset||percent in 1..100){"Use a brightness from 1 to 100."}
@@ -151,6 +174,81 @@ object DeviceTools {
     private fun launch(activity:Activity,intent:Intent):JSONObject {
         try{activity.startActivity(intent)}catch(_:android.content.ActivityNotFoundException){error("No installed app can handle this action.")}
         return JSONObject().put("status","opened").put("action",intent.action).put("note","Opened the system or app UI. Do not assume the user completed or saved the action.")
+    }
+
+    /** Schemes that would bypass Hydra's approval model or execute script in another app's context. */
+    private val blockedSchemes=setOf("content","intent","javascript","data","blob","about","package")
+
+    private fun openUri(activity:Activity,raw:String,project:ProjectFileSource?):JSONObject {
+        require(raw.isNotBlank()&&raw.length<=2048){"Use a URL of at most 2,048 characters."}
+        val uri=Uri.parse(raw);val scheme=uri.scheme?.lowercase(Locale.US)
+        when(scheme) {
+            null,""->error("Include the scheme, e.g. https://, file:/// or youtube://.")
+            "http","https"->require(!uri.host.isNullOrBlank()&&uri.userInfo==null){"Use an HTTP(S) URL without credentials."}
+            "file"->return openFile(activity,uri,project,raw)
+            in blockedSchemes->error("Hydra cannot open $scheme:// links directly for safety.")
+            else->require(!uri.host.isNullOrBlank()||uri.schemeSpecificPart.orEmpty().trimStart('/').isNotBlank()){"That link is missing its destination."}
+        }
+        return launch(activity,Intent(Intent.ACTION_VIEW,uri))
+    }
+
+    /**
+     * Opens a local file for viewing: Hydra's own folders and readable shared-storage files
+     * map straight to a FileProvider content URI; a selected project file that raw paths
+     * cannot reach is copied out through the SAF grant first.
+     */
+    private fun openFile(activity:Activity,uri:Uri,project:ProjectFileSource?,raw:String):JSONObject {
+        val rawPath = if (uri.authority != null && uri.authority!!.matches(Regex("^[A-Za-z]:.*"))) {
+            "${uri.authority}${uri.path.orEmpty()}"
+        } else {
+            uri.path.orEmpty().ifEmpty { raw.removePrefix("file://").removePrefix("file:") }
+        }
+        val normalized = if (rawPath.startsWith("/") && rawPath.length > 2 && rawPath[2] == ':') rawPath.substring(1) else rawPath
+        require(normalized.isNotBlank()){"That file:/// link has no path."}
+        val file=java.io.File(normalized)
+        require(!file.path.contains('\u0000')){"Use a normal file path."}
+        val context=activity
+        val authority="${context.packageName}.fileprovider"
+        fun contentFor(target:java.io.File):Uri=runCatching{androidx.core.content.FileProvider.getUriForFile(context,authority,target)}
+            .getOrElse{
+                val externalRoot = runCatching { android.os.Environment.getExternalStorageDirectory()?.canonicalPath?.trimEnd('/', '\\') }.getOrNull().orEmpty()
+                val targetPath = target.canonicalPath
+                if (externalRoot.isNotEmpty() && targetPath.startsWith(externalRoot)) {
+                    val rel = targetPath.removePrefix(externalRoot).trimStart('/', '\\').replace('\\', '/')
+                    Uri.parse("content://$authority/shared-storage/$rel")
+                } else if(target.isFile&&target.canRead()) {
+                    Uri.parse("content://$authority/shared-storage/${target.name}")
+                } else error("Hydra can only open files inside shared storage or its own app folders.")
+            }
+        val appDirs=listOfNotNull(context.filesDir,context.cacheDir,context.getExternalFilesDir(null),context.getExternalCacheDir())
+        val projectRoot=project?.directory?.trimEnd('/').orEmpty()
+        val contentUri=when {
+            file.isFile&&appDirs.any{file.canonicalPath.startsWith(it.canonicalPath)}->contentFor(file)
+            file.isFile&&file.canRead()->contentFor(file)
+            project!=null&&projectRoot.isNotEmpty()&&file.canonicalPath.startsWith("$projectRoot/")->
+                contentFor(copyFromProject(activity,project,file))
+            file.exists()->error("Hydra doesn't have access to that file. Move it into the selected project folder.")
+            else->error("That file does not exist. Create it with the project or shell tools first.")
+        }
+        val mime=runCatching{context.contentResolver.getType(contentUri)}.getOrNull()?.takeIf{it.isNotBlank()}
+            ?:(android.webkit.MimeTypeMap.getSingleton().getMimeTypeFromExtension(file.extension)?:"application/octet-stream")
+        return launch(activity,Intent(Intent.ACTION_VIEW).setDataAndType(contentUri,mime).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION))
+    }
+
+    private fun copyFromProject(activity:Activity,project:ProjectFileSource,file:java.io.File):java.io.File {
+        val relative=file.canonicalPath.removePrefix(project.directory.trimEnd('/')+"/")
+        val stream=project.open(relative)?:error("That file does not exist in the selected project.")
+        val stagedDir=java.io.File(activity.cacheDir,"opened").apply{listFiles()?.forEach{it.delete()};mkdirs()}
+        val staged=java.io.File(stagedDir,file.name.ifBlank{"file"})
+        stream.use{input->
+            staged.outputStream().use{output->
+                val buffer=ByteArray(65536);var total=0L
+                while(true){val count=input.read(buffer);if(count<0)break
+                    total+=count;require(total<=52_428_800L){"That file is larger than 50 MB."};output.write(buffer,0,count)}
+            }
+        }
+        require(staged.isFile&&staged.length()>0){"Could not open that project file."}
+        return staged
     }
 
     @android.annotation.SuppressLint("MissingPermission")

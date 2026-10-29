@@ -2,6 +2,7 @@
 
 ## Local builds and delivery
 - Read `.android-env.md` when present for the local SDK, JDK, signing, and ADB setup.
+- Deployment mode: before installing an APK, ask the user whether to use wireless ADB or USB. Remember the choice for later installs in the same session and reuse it (fall back to the other mode only if deployment fails).
 - After producing an APK, check for connected ADB devices and install it when one is available.
 - Preserve existing app data; obtain explicit approval before uninstalling an app or clearing its data to resolve a signing mismatch.
 - Do not create a source ZIP unless the user requests one.

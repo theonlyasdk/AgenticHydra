@@ -33,6 +33,8 @@ import kotlinx.coroutines.launch
 @Composable fun HydraBottomSheet(
     onDismiss: () -> Unit,
     containerColor: Color = MaterialTheme.colorScheme.surfaceContainerLow,
+    lock: Boolean = false,
+    heading: (@Composable ColumnScope.(dismiss: () -> Unit) -> Unit)? = null,
     content: @Composable ColumnScope.(dismiss: () -> Unit) -> Unit,
 ) {
     val state = rememberModalBottomSheetState(skipPartiallyExpanded = true)
@@ -56,8 +58,18 @@ import kotlinx.coroutines.launch
     }
     ModalBottomSheet(onDismissRequest = { latestDismiss() },
         modifier = Modifier.windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Top)).padding(top = 8.dp),
-        sheetState = state, containerColor = containerColor, dragHandle = null) {
-        Column(Modifier.fillMaxWidth().animateContentSize(animationSpec = tween(durationMillis = 180, easing = LinearOutSlowInEasing)).padding(top = 16.dp)) { content(dismiss) }
+        sheetState = state, containerColor = containerColor, dragHandle = null,
+        contentWindowInsets = { if (lock) WindowInsets(0, 0, 0, 0) else BottomSheetDefaults.windowInsets }) {
+        Column(Modifier.fillMaxWidth()
+            .animateContentSize(animationSpec = tween(durationMillis = 180, easing = LinearOutSlowInEasing)).padding(top = 16.dp)) {
+            if (heading == null) content(dismiss)
+            else {
+                heading(dismiss)
+                Column(Modifier
+                    .then(if (lock) Modifier.draggable(rememberDraggableState {}, Orientation.Vertical) else Modifier)
+                    .then(if (lock) Modifier.windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Bottom)) else Modifier)) { content(dismiss) }
+            }
+        }
     }
 }
 

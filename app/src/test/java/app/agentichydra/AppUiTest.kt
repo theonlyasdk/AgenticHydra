@@ -154,7 +154,7 @@ class WorkHistoryUiTest : AppUiTestBase() {
 }
 
 class ModelSheetMotionUiTest : AppUiTestBase() {
-    @Test fun manualEntrySlidesAndDoneClosesWithoutRedundantCloseButton() {
+    @Test fun manualEntrySlidesAndDoneCommitsWithoutRedundantCloseButton() {
         compose.onNodeWithText("Choose model").performClick()
         compose.waitUntil(15000){compose.onAllNodesWithText("alpha").fetchSemanticsNodes().isNotEmpty()}
         compose.onNodeWithContentDescription("Close models").assertDoesNotExist()
@@ -163,33 +163,50 @@ class ModelSheetMotionUiTest : AppUiTestBase() {
         compose.onNodeWithText("Model ID",substring=false).performTextInput("my/manual-model")
         compose.onNodeWithContentDescription("Use model ID").performClick()
         compose.mainClock.advanceTimeBy(1000)
-        org.junit.Assert.assertEquals("my/manual-model",(controller.get().application as HydraApplication).models[HydraModel::class.java].model)
+        // The manual ID stays a draft; the live model is untouched until Done.
+        org.junit.Assert.assertEquals("",(controller.get().application as HydraApplication).models[HydraModel::class.java].model)
         compose.onNodeWithText("Done").performClick()
         compose.mainClock.advanceTimeBy(1000)
+        org.junit.Assert.assertEquals("my/manual-model",(controller.get().application as HydraApplication).models[HydraModel::class.java].model)
         compose.onNodeWithText("Search models").assertDoesNotExist()
     }
 }
 
 class ReasoningUiTest : AppUiTestBase() {
-    @Test fun darkReasoningSliderPersistsSelection(){
+    @Test fun darkReasoningSliderDraftsSelectionAndDoneAppliesIt(){
         controller.get().setContent{HydraTheme(darkTheme=true){HydraApp()}}
         compose.waitForIdle()
         screenshot("chat-dark")
         compose.onNodeWithText("Choose model").performClick()
         compose.waitUntil(15000){compose.onAllNodesWithText("gpt-oss-20b").fetchSemanticsNodes().isNotEmpty()}
         compose.onNodeWithText("gpt-oss-20b").performClick()
+        compose.waitForIdle()
         compose.onNode(SemanticsMatcher.keyIsDefined(androidx.compose.ui.semantics.SemanticsProperties.ProgressBarRangeInfo)).performSemanticsAction(SemanticsActions.SetProgress){it(3f)}
         compose.waitForIdle()
-        org.junit.Assert.assertEquals("high",(controller.get().application as HydraApplication).models[HydraModel::class.java].effort)
+        val vm=(controller.get().application as HydraApplication).models[HydraModel::class.java]
+        // Draft only: choosing effort does not rewrite the live setting before Done.
+        org.junit.Assert.assertEquals("auto",vm.effort)
         screenshot("reasoning-dark")
+        compose.onNodeWithText("Done").performClick()
+        compose.mainClock.advanceTimeBy(1000)
+        org.junit.Assert.assertEquals("high",vm.effort)
+        compose.onNodeWithText("gpt-oss-20b").performClick()
+        compose.waitForIdle()
         val slider=compose.onNodeWithTag("reasoning-control")
         slider.performTouchInput { swipe(centerRight,centerLeft) }
         compose.waitForIdle()
-        org.junit.Assert.assertEquals("auto",(controller.get().application as HydraApplication).models[HydraModel::class.java].effort)
-        slider.performTouchInput { swipe(centerLeft,centerRight) }
-        compose.waitForIdle()
-        org.junit.Assert.assertEquals("high",(controller.get().application as HydraApplication).models[HydraModel::class.java].effort)
+        org.junit.Assert.assertEquals("high",vm.effort)
+        compose.onNodeWithText("Done").performClick()
         compose.mainClock.advanceTimeBy(1000)
+        org.junit.Assert.assertEquals("auto",vm.effort)
+        compose.onNodeWithText("gpt-oss-20b").performClick()
+        compose.waitForIdle()
+        compose.onNodeWithTag("reasoning-control").performTouchInput { swipe(centerLeft,centerRight) }
+        compose.waitForIdle()
+        compose.onNodeWithText("Done").performClick()
+        compose.mainClock.advanceTimeBy(1000)
+        org.junit.Assert.assertEquals("high",vm.effort)
+        compose.onNodeWithText("gpt-oss-20b").performClick()
         compose.waitForIdle()
         val pillBounds=compose.onNodeWithTag("reasoning-pill").fetchSemanticsNode().boundsInRoot
         val controlBounds=slider.fetchSemanticsNode().boundsInRoot
