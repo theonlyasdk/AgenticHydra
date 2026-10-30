@@ -4,7 +4,6 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class ThinkingMessagesTest {
-
     @Test
     fun thinkingMessagesListIsHugeAndContainsClaudeAndHarnessMessages() {
         val messages = ThinkingMessages.ALL_MESSAGES

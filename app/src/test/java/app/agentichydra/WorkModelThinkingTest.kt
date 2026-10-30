@@ -14,18 +14,21 @@ import org.robolectric.annotation.Config
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34])
 class WorkModelThinkingTest {
-
     @Test
-    fun initialDescriptionIsSetAndNotPlainUnderstandingRequest() = runTest {
-        val app = ApplicationProvider.getApplicationContext<Application>()
-        val work = WorkModel(app)
+    fun initialDescriptionIsSetAndNotPlainUnderstandingRequest() =
+        runTest {
+            val app = ApplicationProvider.getApplicationContext<Application>()
+            val work = WorkModel(app)
 
-        val prompt = "Fix the NullPointerException in user profile"
-        val expectedInitial = ThinkingMessages.initialDescription(prompt)
+            val prompt = "Fix the NullPointerException in user profile"
+            val expectedInitial = ThinkingMessages.initialDescription(prompt)
 
-        assertTrue("Expected bug/fix intent sentence", expectedInitial.contains("issue") || expectedInitial.contains("fix"))
-        assertNotEquals("Understanding your request…", expectedInitial)
-    }
+            assertTrue(
+                "Expected bug/fix intent sentence",
+                expectedInitial.contains("issue") || expectedInitial.contains("fix"),
+            )
+            assertNotEquals("Understanding your request…", expectedInitial)
+        }
 
     @Test
     fun thinkingMessagesCycleSequenceIntervalIsConsistent() {

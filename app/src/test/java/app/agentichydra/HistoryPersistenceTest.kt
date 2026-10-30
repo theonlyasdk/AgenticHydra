@@ -16,19 +16,41 @@ import org.robolectric.annotation.Config
 @Config(sdk = [34])
 class HistoryPersistenceTest {
     private lateinit var app: Application
-    @Before fun seed() {
+
+    @Before
+    fun seed() {
         app = ApplicationProvider.getApplicationContext()
-        val history = JSONArray().put(JSONObject().put("id", "chat-1").put("title", "Original")
-            .put("messages", JSONArray().put(JSONObject().put("role", "user").put("text", "First prompt"))))
-        app.getSharedPreferences("hydra", Context.MODE_PRIVATE).edit().clear()
-            .putString("provider", "GEMINI").putString("history", history.toString()).commit()
-        val record = JSONObject().put("title", "Task").put("status", "Completed").put("summary", "Done")
-            .put("steps", JSONArray()).put("changes", JSONArray())
-        app.getSharedPreferences("work", Context.MODE_PRIVATE).edit().clear()
-            .putString("records", JSONArray().put(record).put(record).toString()).commit()
+        val history =
+            JSONArray().put(
+                JSONObject()
+                    .put("id", "chat-1")
+                    .put("title", "Original")
+                    .put("messages", JSONArray().put(JSONObject().put("role", "user").put("text", "First prompt"))),
+            )
+        app
+            .getSharedPreferences("hydra", Context.MODE_PRIVATE)
+            .edit()
+            .clear()
+            .putString("provider", "GEMINI")
+            .putString("history", history.toString())
+            .commit()
+        val record =
+            JSONObject()
+                .put("title", "Task")
+                .put("status", "Completed")
+                .put("summary", "Done")
+                .put("steps", JSONArray())
+                .put("changes", JSONArray())
+        app
+            .getSharedPreferences("work", Context.MODE_PRIVATE)
+            .edit()
+            .clear()
+            .putString("records", JSONArray().put(record).put(record).toString())
+            .commit()
     }
 
-    @Test fun renamedTitleSurvivesActiveChatCheckpointsAndReload() {
+    @Test
+    fun renamedTitleSurvivesActiveChatCheckpointsAndReload() {
         val model = HydraModel(app)
         model.open(model.conversations.single())
         model.renameConversation("chat-1", "  My renamed chat  ")
@@ -38,7 +60,8 @@ class HistoryPersistenceTest {
         assertEquals("My renamed chat", model.conversations.single().title)
     }
 
-    @Test fun deletingOpenConversationCannotBeRestoredByStopOrReload() {
+    @Test
+    fun deletingOpenConversationCannotBeRestoredByStopOrReload() {
         val model = HydraModel(app)
         model.open(model.conversations.single())
         model.deleteConversation("chat-1")
@@ -48,7 +71,8 @@ class HistoryPersistenceTest {
         assertTrue(HydraModel(app).conversations.isEmpty())
     }
 
-    @Test fun deletingAnIdenticalWorkRecordRemovesOnlyThatEntryAndPersists() {
+    @Test
+    fun deletingAnIdenticalWorkRecordRemovesOnlyThatEntryAndPersists() {
         val model = WorkModel(app)
         model.deleteRecord(model.records.last())
         assertEquals(1, model.records.size)
@@ -57,8 +81,17 @@ class HistoryPersistenceTest {
         assertTrue(WorkModel(app).records.isEmpty())
     }
 
-    @Test fun exportIncludesFullConversationWithoutUiTruncation() {
-        val conversation = Conversation("export", "A title", listOf(Message("user", "Question"), Message("assistant", "```kotlin\nval x = 1\n```")))
-        assertEquals("# A title\n\n## You\n\nQuestion\n\n## Hydra\n\n```kotlin\nval x = 1\n```\n", conversation.exportMarkdown())
+    @Test
+    fun exportIncludesFullConversationWithoutUiTruncation() {
+        val conversation =
+            Conversation(
+                "export",
+                "A title",
+                listOf(Message("user", "Question"), Message("assistant", "```kotlin\nval x = 1\n```")),
+            )
+        assertEquals(
+            "# A title\n\n## You\n\nQuestion\n\n## Hydra\n\n```kotlin\nval x = 1\n```\n",
+            conversation.exportMarkdown(),
+        )
     }
 }

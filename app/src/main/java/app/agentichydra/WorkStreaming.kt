@@ -2,16 +2,13 @@ package app.agentichydra
 
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
-
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
-
 import org.json.JSONArray
 import org.json.JSONObject
-
 import java.io.IOException
 
 /**
@@ -61,7 +58,11 @@ internal class WorkStreamTurn(
         if (response.code in RETRYABLE_CODES && retryWithoutTools && payload.has(TOOLS)) {
             response.close()
             currentCoroutineContext().ensureActive()
-            val fallbackPayload = JSONObject(payload.toString()).apply { remove(TOOLS); remove(TOOL_CHOICE) }
+            val fallbackPayload =
+                JSONObject(payload.toString()).apply {
+                    remove(TOOLS)
+                    remove(TOOL_CHOICE)
+                }
             val fallbackCall = client.newCall(request(fallbackPayload))
             onCall(fallbackCall)
             response = fallbackCall.execute()
@@ -78,11 +79,12 @@ internal class WorkStreamTurn(
                 val firstChoice = json.optJSONArray("choices")?.optJSONObject(0)
                 val msg = firstChoice?.optJSONObject("message")
                 val content = msg?.optString("content", "") ?: ""
-                val thought = msg?.optString("reasoning_content").orEmpty().ifEmpty {
-                    msg?.optString("reasoning").orEmpty().ifEmpty {
-                        msg?.optString("thought").orEmpty()
+                val thought =
+                    msg?.optString("reasoning_content").orEmpty().ifEmpty {
+                        msg?.optString("reasoning").orEmpty().ifEmpty {
+                            msg?.optString("thought").orEmpty()
+                        }
                     }
-                }
                 if (thought.isNotEmpty()) onThought(thought)
                 if (content.isNotEmpty()) onText(content)
                 return json
@@ -115,11 +117,12 @@ internal class WorkStreamTurn(
 
                 val delta = event.optJSONArray("choices")?.optJSONObject(0)?.optJSONObject("delta") ?: continue
 
-                val reasoningChunk = delta.optString("reasoning_content").ifEmpty {
-                    delta.optString("reasoning").ifEmpty {
-                        delta.optString("thought")
+                val reasoningChunk =
+                    delta.optString("reasoning_content").ifEmpty {
+                        delta.optString("reasoning").ifEmpty {
+                            delta.optString("thought")
+                        }
                     }
-                }
                 if (reasoningChunk.isNotEmpty()) {
                     thought += reasoningChunk
                     onThought(thought)
@@ -145,11 +148,12 @@ internal class WorkStreamTurn(
                             if (thought.isEmpty() && !hasInlineThink && trimmed.length < 7 && "<think>".startsWith(trimmed)) {
                                 // Buffer potential <think> tag prefix until confirmed or diverged
                             } else {
-                                text = if (hasInlineThink && rawContent.contains("</think>")) {
-                                    rawContent.substringAfter("</think>").trimStart()
-                                } else {
-                                    text + chunk
-                                }
+                                text =
+                                    if (hasInlineThink && rawContent.contains("</think>")) {
+                                        rawContent.substringAfter("</think>").trimStart()
+                                    } else {
+                                        text + chunk
+                                    }
                                 onText(text)
                             }
                         }
@@ -160,16 +164,18 @@ internal class WorkStreamTurn(
 
             if (hasInlineThink && thought.isEmpty()) {
                 val afterOpen = rawContent.trimStart().removePrefix("<think>")
-                thought = if (afterOpen.contains("</think>")) {
-                    afterOpen.substringBefore("</think>").trim()
-                } else {
-                    afterOpen.trim()
-                }
-                text = if (afterOpen.contains("</think>")) {
-                    afterOpen.substringAfter("</think>").trimStart()
-                } else {
-                    ""
-                }
+                thought =
+                    if (afterOpen.contains("</think>")) {
+                        afterOpen.substringBefore("</think>").trim()
+                    } else {
+                        afterOpen.trim()
+                    }
+                text =
+                    if (afterOpen.contains("</think>")) {
+                        afterOpen.substringAfter("</think>").trimStart()
+                    } else {
+                        ""
+                    }
             }
 
             return assemble(text, usage, toolCalls, thought)
@@ -181,10 +187,12 @@ internal class WorkStreamTurn(
     private fun request(): Request = request(payload)
 
     private fun request(body: JSONObject): Request {
-        val builder = Request.Builder()
-            .url(url)
-            .header("Accept", "text/event-stream")
-            .post(body.toString().toRequestBody(JSON_TYPE))
+        val builder =
+            Request
+                .Builder()
+                .url(url)
+                .header("Accept", "text/event-stream")
+                .post(body.toString().toRequestBody(JSON_TYPE))
         if (credential.isNotBlank()) builder.header("Authorization", "Bearer $credential")
         return builder.build()
     }
@@ -192,10 +200,16 @@ internal class WorkStreamTurn(
     // Streaming response parsing -------------------------------------------
 
     /** Reassembles the deltas into a non-streaming-shaped response object. */
-    private fun assemble(text: String, usage: JSONObject?, toolCalls: ToolCallBuffer, thought: String = ""): JSONObject {
-        val message = JSONObject()
-            .put("role", "assistant")
-            .put("content", text)
+    private fun assemble(
+        text: String,
+        usage: JSONObject?,
+        toolCalls: ToolCallBuffer,
+        thought: String = "",
+    ): JSONObject {
+        val message =
+            JSONObject()
+                .put("role", "assistant")
+                .put("content", text)
         if (thought.isNotBlank()) {
             message.put("reasoning_content", thought)
         }
@@ -220,13 +234,14 @@ internal class WorkStreamTurn(
             detail.contains(INCLUDE_USAGE, ignoreCase = true)
     }
 
-    private fun describeFailure(code: Int): String = when (code) {
-        400, 422 -> "The model rejected this request. Try Default reasoning or choose a compatible model."
-        401, 403 -> "Access denied. Check your API key and model permissions."
-        404 -> "Model or endpoint not found. Check the connection settings."
-        429 -> "Provider limit reached. Wait a moment and try again."
-        else -> "Provider returned HTTP $code. Check this model's tool support, reasoning setting, and connection."
-    }
+    private fun describeFailure(code: Int): String =
+        when (code) {
+            400, 422 -> "The model rejected this request. Try Default reasoning or choose a compatible model."
+            401, 403 -> "Access denied. Check your API key and model permissions."
+            404 -> "Model or endpoint not found. Check the connection settings."
+            429 -> "Provider limit reached. Wait a moment and try again."
+            else -> "Provider returned HTTP $code. Check this model's tool support, reasoning setting, and connection."
+        }
 
     private companion object {
         const val DATA_PREFIX = "data:"
@@ -278,19 +293,26 @@ private class ToolCallBuffer {
 }
 
 /** Separates reasoning thought from response text, handling tags and API fields. */
-internal fun extractThought(rawText: String, rawThought: String): Pair<String, String> {
+internal fun extractThought(
+    rawText: String,
+    rawThought: String,
+): Pair<String, String> {
     if (rawThought.isNotBlank()) {
-        val cleanText = if (rawText.trimStart().startsWith("<think>") && rawText.contains("</think>")) {
-            rawText.substringAfter("</think>").trimStart()
-        } else rawText
+        val cleanText =
+            if (rawText.trimStart().startsWith("<think>") && rawText.contains("</think>")) {
+                rawText.substringAfter("</think>").trimStart()
+            } else {
+                rawText
+            }
         return cleanText to rawThought
     }
     if (rawText.trimStart().startsWith("<think>")) {
-        val thought = if (rawText.contains("</think>")) {
-            rawText.substringAfter("<think>").substringBefore("</think>").trim()
-        } else {
-            rawText.trimStart().removePrefix("<think>").trim()
-        }
+        val thought =
+            if (rawText.contains("</think>")) {
+                rawText.substringAfter("<think>").substringBefore("</think>").trim()
+            } else {
+                rawText.trimStart().removePrefix("<think>").trim()
+            }
         val text = if (rawText.contains("</think>")) rawText.substringAfter("</think>").trimStart() else ""
         return text to thought
     }

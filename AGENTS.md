@@ -7,6 +7,12 @@
 - Preserve existing app data; obtain explicit approval before uninstalling an app or clearing its data to resolve a signing mismatch.
 - Do not create a source ZIP unless the user requests one.
 
+## Code style
+- Keep code neat and formatted; match the surrounding style and remove dead code or unused imports.
+- Use clear, concise variable and function names. Avoid long, ambiguous, or cryptic abbreviations.
+- Prefer small single-purpose helpers and early returns over deep nesting.
+- Build after edits and fix any warnings you introduced.
+
 ## Theme and tokens
 - NEVER hardcode colors, text styles, shapes, or fonts in composables.
   Use only MaterialTheme.colorScheme / typography / shapes.

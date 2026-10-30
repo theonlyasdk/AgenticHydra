@@ -60,6 +60,8 @@ dependencies {
     // WorkManager 2.10 supports this project's compileSdk 35 toolchain.
     //noinspection GradleDependency
     implementation("androidx.work:work-runtime-ktx:2.10.1")
+    implementation("io.github.rosemoe:editor:0.23.7")
+    implementation("io.github.rosemoe:language-textmate:0.23.7")
     implementation("io.noties.markwon:core:4.6.2")
     implementation("io.noties.markwon:ext-tables:4.6.2")
     implementation("io.noties.markwon:ext-strikethrough:4.6.2")

@@ -9,6 +9,8 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import androidx.core.content.edit
+import androidx.core.net.toUri
 import androidx.documentfile.provider.DocumentFile
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
@@ -19,9 +21,9 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.withContext
@@ -31,25 +33,27 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.util.UUID
 import java.util.concurrent.TimeUnit
-import androidx.core.content.edit
-import androidx.core.net.toUri
 
-class WorkModel(app: Application) : AndroidViewModel(app) {
-
+class WorkModel(
+    app: Application,
+) : AndroidViewModel(app) {
     private val prefs = app.getSharedPreferences("work", Context.MODE_PRIVATE)
-    private val client = OkHttpClient.Builder()
-        .connectTimeout(20, TimeUnit.SECONDS)
-        .readTimeout(120, TimeUnit.SECONDS)
-        .build()
+    private val client =
+        OkHttpClient
+            .Builder()
+            .connectTimeout(20, TimeUnit.SECONDS)
+            .readTimeout(120, TimeUnit.SECONDS)
+            .build()
     private val web = WorkWeb(client)
-    internal val engine = BackgroundTaskEngine(
-        client,
-        app,
-        projectFiles = { runCatching { projectTools() }.getOrNull() },
-        onRecord = ::upsertRecord,
-        onFirstRun = ::startTaskService,
-        onIdle = ::stopTaskServiceIfIdle
-    )
+    internal val engine =
+        BackgroundTaskEngine(
+            client,
+            app,
+            projectFiles = { runCatching { projectTools() }.getOrNull() },
+            onRecord = ::upsertRecord,
+            onFirstRun = ::startTaskService,
+            onIdle = ::stopTaskServiceIfIdle,
+        )
     private var runConnection: WorkConnection? = null
     internal var runCompletion = CompletableDeferred<WorkRunOutcome>()
         private set
@@ -64,7 +68,7 @@ class WorkModel(app: Application) : AndroidViewModel(app) {
             ApprovalMode.valueOf(prefs.getString("approvalMode", ApprovalMode.CHANGES.name)!!)
         }.getOrDefault(ApprovalMode.CHANGES).let {
             if (it == ApprovalMode.SESSION) ApprovalMode.CHANGES else it
-        }
+        },
     )
     var mode: ApprovalMode
         get() = selectedMode
@@ -73,7 +77,7 @@ class WorkModel(app: Application) : AndroidViewModel(app) {
             prefs.edit {
                 putString(
                     "approvalMode",
-                    if (value == ApprovalMode.SESSION) ApprovalMode.CHANGES.name else value.name
+                    if (value == ApprovalMode.SESSION) ApprovalMode.CHANGES.name else value.name,
                 )
             }
         }
@@ -82,6 +86,8 @@ class WorkModel(app: Application) : AndroidViewModel(app) {
     var pendingQuestions by mutableStateOf<AgentQuestionRequest?>(null)
         private set
     var pendingDeviceAction by mutableStateOf<DeviceActionRequest?>(null)
+        private set
+    var termuxPromptId by mutableStateOf<String?>(null)
         private set
     private var questionDecision: CompletableDeferred<String>? = null
     private var pendingImage: ReadImage? = null
@@ -98,6 +104,7 @@ class WorkModel(app: Application) : AndroidViewModel(app) {
         private set
     var streamingId by mutableStateOf<String?>(null)
         private set
+
     // Id of the assistant message currently being streamed, if any.
     private var streamDraftId: String? = null
     var summary by mutableStateOf("")
@@ -132,54 +139,76 @@ class WorkModel(app: Application) : AndroidViewModel(app) {
     init {
         runCatching {
             val all = JSONArray(prefs.getString("records", "[]"))
-            records = (0 until all.length()).map {
-                WorkRecord.fromJson(all.getJSONObject(it), projectUri, projectName, directory)
-            }
+            records =
+                (0 until all.length()).map {
+                    WorkRecord.fromJson(all.getJSONObject(it), projectUri, projectName, directory)
+                }
             if ((0 until all.length()).any {
                     !all.getJSONObject(it).has("id") ||
                         !all.getJSONObject(it).has("messages") ||
                         records[it].status != all.getJSONObject(it).optString("status")
-                }) {
+                }
+            ) {
                 persistRecords()
             }
             // A background task interrupted by process death stays marked Running; recover it.
-            if (records.any { it.status == "Running" || it.steps.any { step -> step.state in listOf("Waiting", "Running") } }) {
-                records = records.map { record ->
-                    record.copy(
-                        status = if (record.status == "Running") "Interrupted" else record.status,
-                        steps = record.steps.map {
-                            if (it.state in listOf("Waiting", "Running")) it.copy(state = "Interrupted") else it
-                        }
-                    )
+            if (records.any {
+                    it.status == "Running" ||
+                        it.steps.any { step -> step.state in listOf("Waiting", "Running") }
                 }
+            ) {
+                records =
+                    records.map { record ->
+                        record.copy(
+                            status = if (record.status == "Running") "Interrupted" else record.status,
+                            steps =
+                                record.steps.map {
+                                    if (it.state in listOf("Waiting", "Running")) it.copy(state = "Interrupted") else it
+                                },
+                        )
+                    }
                 persistRecords()
             }
             if (prefs.getBoolean("active", false)) {
-                val saved = runCatching {
-                    JSONObject(prefs.getString("snapshot", "{}")!!)
-                }.getOrNull()
+                val saved =
+                    runCatching {
+                        JSONObject(prefs.getString("snapshot", "{}")!!)
+                    }.getOrNull()
                 if (saved?.has("title") == true) {
-                    val interrupted = WorkRecord.fromJson(saved, projectUri, projectName, directory).let { record ->
-                        record.copy(
-                            status = "Interrupted",
-                            steps = record.steps.map {
-                                if (it.state in listOf("Waiting", "Running")) it.copy(state = "Interrupted") else it
-                            }
-                        )
-                    }
+                    val interrupted =
+                        WorkRecord.fromJson(saved, projectUri, projectName, directory).let { record ->
+                            record.copy(
+                                status = "Interrupted",
+                                steps =
+                                    record.steps.map {
+                                        if (it.state in
+                                            listOf("Waiting", "Running")
+                                        ) {
+                                            it.copy(state = "Interrupted")
+                                        } else {
+                                            it
+                                        }
+                                    },
+                            )
+                        }
                     records = listOf(interrupted) + records.filterNot { it.id == interrupted.id }
                 } else {
                     // Migrate the old single-run checkpoint without dropping its saved work.
                     val old = saved ?: JSONObject()
-                    val legacy = WorkRecord.fromJson(
-                        JSONObject()
-                            .put("title", prefs.getString("activeTitle", "Interrupted task"))
-                            .put("status", "Interrupted")
-                            .put("summary", "The previous run was interrupted. Check the project before continuing.")
-                            .put("steps", old.optJSONArray("steps") ?: JSONArray())
-                            .put("changes", old.optJSONArray("changes") ?: JSONArray()),
-                        projectUri, projectName, directory
-                    )
+                    val legacy =
+                        WorkRecord.fromJson(
+                            JSONObject()
+                                .put("title", prefs.getString("activeTitle", "Interrupted task"))
+                                .put("status", "Interrupted")
+                                .put(
+                                    "summary",
+                                    "The previous run was interrupted. Check the project before continuing.",
+                                ).put("steps", old.optJSONArray("steps") ?: JSONArray())
+                                .put("changes", old.optJSONArray("changes") ?: JSONArray()),
+                            projectUri,
+                            projectName,
+                            directory,
+                        )
                     records = listOf(legacy) + records
                 }
                 prefs.edit { putBoolean("active", false) }
@@ -204,10 +233,11 @@ class WorkModel(app: Application) : AndroidViewModel(app) {
         ToolPolicy.parts(path)
         context.contentResolver.takePersistableUriPermission(
             uri,
-            Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+            Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION,
         )
-        val root = DocumentFile.fromTreeUri(context, uri)
-            ?: error("Folder could not be opened.")
+        val root =
+            DocumentFile.fromTreeUri(context, uri)
+                ?: error("Folder could not be opened.")
         require(root.canRead() && root.canWrite()) {
             "Hydra needs read and write access to this folder."
         }
@@ -220,6 +250,7 @@ class WorkModel(app: Application) : AndroidViewModel(app) {
                 .putString("directory", directory)
         }
         browserPath = ""
+        selectedFile = null
         refreshFiles("")
         if (task.isNotBlank()) {
             checkpoint()
@@ -229,25 +260,30 @@ class WorkModel(app: Application) : AndroidViewModel(app) {
 
     private fun projectTools(): ProjectTools {
         val uri = projectUri ?: error("Select a project folder before using project tools.")
-        val root = DocumentFile.fromTreeUri(getApplication(), uri.toUri())
-            ?.takeIf { it.exists() && it.canRead() }
-            ?: error("Project access expired. Select the folder again.")
+        val root =
+            DocumentFile
+                .fromTreeUri(getApplication(), uri.toUri())
+                ?.takeIf { it.exists() && it.canRead() }
+                ?: error("Project access expired. Select the folder again.")
         return ProjectTools(getApplication(), root)
     }
 
     /** SAF-backed file access so device tools can open selected-project files without raw-path permissions. */
-    internal fun projectFileSource():ProjectFileSource? {
-        val selectedUri=projectUri?:return null
-        val dir=directory
-        val app=getApplication<Application>()
-        return object:ProjectFileSource{
-            override val directory:String=dir
-            override fun open(relativePath:String):java.io.InputStream?=runCatching {
-                val root=DocumentFile.fromTreeUri(app,selectedUri.toUri())?.takeIf{it.exists()&&it.canRead()}
-                    ?:return@runCatching null
-                val file=ProjectTools(app,root).resolve(relativePath)
-                if(!file.isFile)null else app.contentResolver.openInputStream(file.uri)
-            }.getOrNull()
+    internal fun projectFileSource(): ProjectFileSource? {
+        val selectedUri = projectUri ?: return null
+        val dir = directory
+        val app = getApplication<Application>()
+        return object : ProjectFileSource {
+            override val directory: String = dir
+
+            override fun open(relativePath: String): java.io.InputStream? =
+                runCatching {
+                    val root =
+                        DocumentFile.fromTreeUri(app, selectedUri.toUri())?.takeIf { it.exists() && it.canRead() }
+                            ?: return@runCatching null
+                    val file = ProjectTools(app, root).resolve(relativePath)
+                    if (!file.isFile) null else app.contentResolver.openInputStream(file.uri)
+                }.getOrNull()
         }
     }
 
@@ -258,14 +294,16 @@ class WorkModel(app: Application) : AndroidViewModel(app) {
         }
         viewModelScope.launch {
             try {
-                val result = runInterruptible(Dispatchers.IO) {
-                    val dir = projectTools().resolve(path)
-                    require(dir.isDirectory) { "Choose a directory." }
-                    dir.listFiles()
-                        .sortedWith(compareBy<DocumentFile> { !it.isDirectory }.thenBy { it.name })
-                        .take(150)
-                        .map { (if (it.isDirectory) "/" else "") + (it.name ?: "?") }
-                }
+                val result =
+                    runInterruptible(Dispatchers.IO) {
+                        val dir = projectTools().resolve(path)
+                        require(dir.isDirectory) { "Choose a directory." }
+                        dir
+                            .listFiles()
+                            .sortedWith(compareBy<DocumentFile> { !it.isDirectory }.thenBy { it.name })
+                            .take(150)
+                            .map { (if (it.isDirectory) "/" else "") + (it.name ?: "?") }
+                    }
                 files = result
                 browserPath = path
             } catch (e: CancellationException) {
@@ -287,9 +325,10 @@ class WorkModel(app: Application) : AndroidViewModel(app) {
     fun browse(path: String) {
         viewModelScope.launch {
             try {
-                selectedFile = path to runInterruptible(Dispatchers.IO) {
-                    projectTools().read(path)
-                }
+                selectedFile = path to
+                    runInterruptible(Dispatchers.IO) {
+                        projectTools().read(path)
+                    }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -298,7 +337,22 @@ class WorkModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun approveStep(id: String, allow: Boolean) {
+    suspend fun saveFile(
+        path: String,
+        text: String,
+    ) {
+        val change = withContext(Dispatchers.IO) { projectTools().write(path, text) }
+        if (change.before != change.after) {
+            changes = changes + change
+            checkpoint()
+        }
+        selectedFile = path to text
+    }
+
+    fun approveStep(
+        id: String,
+        allow: Boolean,
+    ) {
         if (pendingApproval?.id == id) {
             decision?.complete(allow)
             pendingApproval = null
@@ -316,9 +370,13 @@ class WorkModel(app: Application) : AndroidViewModel(app) {
         pendingApproval = null
         pendingQuestions = null
         pendingDeviceAction = null
+        termuxPromptId = null
     }
 
-    fun attach(uri: Uri, media: Boolean) {
+    fun attach(
+        uri: Uri,
+        media: Boolean,
+    ) {
         if (running || draftAttachments.size + pendingAttachments >= 4) {
             error = "Attach up to four files or images before sending."
             return
@@ -327,9 +385,10 @@ class WorkModel(app: Application) : AndroidViewModel(app) {
         pendingAttachments++
         viewModelScope.launch {
             try {
-                val attachment = withContext(Dispatchers.IO) {
-                    WorkAttachments.stage(getApplication(), uri, media)
-                }
+                val attachment =
+                    withContext(Dispatchers.IO) {
+                        WorkAttachments.stage(getApplication(), uri, media)
+                    }
                 if (activeId == targetId && !running) {
                     draftAttachments = draftAttachments + attachment
                 } else {
@@ -355,7 +414,10 @@ class WorkModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun renameConversation(id: String, title: String) {
+    fun renameConversation(
+        id: String,
+        title: String,
+    ) {
         val clean = title.trim().replace(Regex("\\s+"), " ")
         if (clean.isBlank()) return
         if (activeId == id) {
@@ -374,28 +436,36 @@ class WorkModel(app: Application) : AndroidViewModel(app) {
         super.onCleared()
     }
 
-    fun answerQuestions(id: String, answers: String?) {
+    fun answerQuestions(
+        id: String,
+        answers: String?,
+    ) {
         val request = pendingQuestions?.takeIf { it.id == id } ?: return
-        val result = if (answers == null) {
-            JSONObject().put("status", "cancelled")
-                .put("instruction", "The user dismissed these questions. Do not repeat them without new instructions.")
-                .toString()
-        } else {
-            val response = JSONObject(answers)
-            require(
-                response.getString("status") == "answered" &&
-                    response.getJSONArray("answers").length() == request.questions.size
-            ) { "Invalid question response." }
-            val values = response.getJSONArray("answers")
-            require(
-                answers.length <= 15000 && (0 until values.length()).all { index ->
-                    val value = values.getJSONObject(index)
-                    val question = request.questions[index]
-                    value.getString("id") == question.id && QuestionTool.valid(question, value)
-                }
-            ) { "Question answers did not match the request." }
-            answers
-        }
+        val result =
+            if (answers == null) {
+                JSONObject()
+                    .put("status", "cancelled")
+                    .put(
+                        "instruction",
+                        "The user dismissed these questions. Do not repeat them without new instructions.",
+                    ).toString()
+            } else {
+                val response = JSONObject(answers)
+                require(
+                    response.getString("status") == "answered" &&
+                        response.getJSONArray("answers").length() == request.questions.size,
+                ) { "Invalid question response." }
+                val values = response.getJSONArray("answers")
+                require(
+                    answers.length <= 15000 &&
+                        (0 until values.length()).all { index ->
+                            val value = values.getJSONObject(index)
+                            val question = request.questions[index]
+                            value.getString("id") == question.id && QuestionTool.valid(question, value)
+                        },
+                ) { "Question answers did not match the request." }
+                answers
+            }
         questionDecision?.complete(result)
         pendingQuestions = null
     }
@@ -412,11 +482,18 @@ class WorkModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun completeDeviceAction(id: String, result: WorkToolResult) {
+    fun completeDeviceAction(
+        id: String,
+        result: WorkToolResult,
+    ) {
         if (pendingDeviceAction?.id == id) {
             deviceDecision?.complete(result)
             pendingDeviceAction = null
         }
+    }
+
+    fun dismissTermuxPrompt() {
+        termuxPromptId = null
     }
 
     fun newThread(): Boolean {
@@ -441,6 +518,8 @@ class WorkModel(app: Application) : AndroidViewModel(app) {
         progress = ""
         files = emptyList()
         browserPath = ""
+        selectedFile = null
+        termuxPromptId = null
         return true
     }
 
@@ -465,6 +544,8 @@ class WorkModel(app: Application) : AndroidViewModel(app) {
         directory = current.directory
         browserPath = ""
         files = emptyList()
+        selectedFile = null
+        termuxPromptId = null
         return true
     }
 
@@ -485,37 +566,53 @@ class WorkModel(app: Application) : AndroidViewModel(app) {
         if (index < 0) return
         records = records.filterIndexed { i, _ -> i != index }
         persistRecords()
-        val retained = records.flatMap { it.messages }
-            .flatMap { it.attachments }
-            .map { it.id }
-            .toSet() + draftAttachments.map { it.id }
-        val removed = record.messages.flatMap { it.attachments }
-            .filterNot { it.id in retained }
-            .distinctBy { it.id }
+        val retained =
+            records
+                .flatMap { it.messages }
+                .flatMap { it.attachments }
+                .map { it.id }
+                .toSet() + draftAttachments.map { it.id }
+        val removed =
+            record.messages
+                .flatMap { it.attachments }
+                .filterNot { it.id in retained }
+                .distinctBy { it.id }
         viewModelScope.launch(Dispatchers.IO) {
             removed.forEach { WorkAttachments.remove(getApplication(), it) }
         }
         if (record.id == activeId) newThread()
     }
 
-    private fun snapshot() = WorkRecord(
-        task, status, summary, steps, changes, activeId, messages,
-        history.toString(), projectUri, projectName, directory
-    )
+    private fun snapshot() =
+        WorkRecord(
+            task,
+            status,
+            summary,
+            steps,
+            changes,
+            activeId,
+            messages,
+            history.toString(),
+            projectUri,
+            projectName,
+            directory,
+        )
 
     private fun checkpoint() {
         if (task.isBlank()) return
         val record = snapshot()
         records = (listOf(record) + records.filterNot { it.id == record.id }).take(40)
         // Only the active conversation is serialized on each step; completed history is saved per turn.
-        prefs.edit()
+        prefs
+            .edit()
             .putString("snapshot", record.json().toString())
             .putBoolean("active", running)
             .apply()
     }
 
     private fun persistRecords() {
-        prefs.edit()
+        prefs
+            .edit()
             .putString("records", JSONArray().apply { records.forEach { put(it.json()) } }.toString())
             .apply()
     }
@@ -535,7 +632,7 @@ class WorkModel(app: Application) : AndroidViewModel(app) {
     private fun startTaskService(conversationId: String) {
         if (running) return // A foreground run already keeps the process alive.
         getApplication<Application>().startForegroundService(
-            Intent(getApplication(), TaskService::class.java).putExtra("conversationId", conversationId)
+            Intent(getApplication(), TaskService::class.java).putExtra("conversationId", conversationId),
         )
     }
 
@@ -545,7 +642,10 @@ class WorkModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun start(prompt: String, connection: HydraModel) {
+    fun start(
+        prompt: String,
+        connection: HydraModel,
+    ) {
         if (running || prompt.isBlank()) return
         if (!validConnection(WorkConnection.from(connection))) return
         newThread()
@@ -554,43 +654,58 @@ class WorkModel(app: Application) : AndroidViewModel(app) {
 
     private fun validConnection(connection: WorkConnection): Boolean {
         val parsed = runCatching { java.net.URI(connection.endpoint) }.getOrNull()
-        error = when {
-            connection.model.isBlank() -> "Choose a model in the task composer first."
-            connection.provider.keyRequired && connection.apiKey.isBlank() ->
-                "Add your API key in Connections first."
-            parsed?.scheme !in listOf("https", "http") ||
-                parsed?.host.isNullOrBlank() ||
-                parsed.userInfo != null ||
-                parsed.query != null ||
-                parsed.fragment != null ->
-                "Use a valid provider base URL without credentials or query parameters."
-            parsed?.scheme == "http" && connection.apiKey.isNotBlank() ->
-                "Use HTTPS with an API key."
-            else -> null
-        }
+        error =
+            when {
+                connection.model.isBlank() -> {
+                    "Choose a model in the task composer first."
+                }
+
+                connection.provider.keyRequired && connection.apiKey.isBlank() -> {
+                    "Add your API key in Connections first."
+                }
+
+                parsed?.scheme !in listOf("https", "http") ||
+                    parsed?.host.isNullOrBlank() ||
+                    parsed.userInfo != null ||
+                    parsed.query != null ||
+                    parsed.fragment != null -> {
+                    "Use a valid provider base URL without credentials or query parameters."
+                }
+
+                parsed?.scheme == "http" && connection.apiKey.isNotBlank() -> {
+                    "Use HTTPS with an API key."
+                }
+
+                else -> {
+                    null
+                }
+            }
         return error == null
     }
 
-    fun followUp(input: String, connection: HydraModel): Boolean =
-        followUp(input, WorkConnection.from(connection))
+    fun followUp(
+        input: String,
+        connection: HydraModel,
+    ): Boolean = followUp(input, WorkConnection.from(connection))
 
-    fun resume(connection: HydraModel): Boolean =
-        followUp("Continue.", WorkConnection.from(connection), allowEmpty = true)
+    fun resume(connection: HydraModel): Boolean = followUp("Continue.", WorkConnection.from(connection), allowEmpty = true)
 
     internal fun followUp(
         input: String,
         connection: WorkConnection,
         managedForeground: Boolean = false,
-        allowEmpty: Boolean = false
+        allowEmpty: Boolean = false,
     ): Boolean {
         if (running || attaching || (!allowEmpty && input.isBlank() && draftAttachments.isEmpty()) || !validConnection(connection)) {
             return false
         }
+        termuxPromptId = null
         val prompt = input.trim()
         if (task.isBlank()) {
-            task = prompt.lineSequence().first().take(80).ifBlank {
-                draftAttachments.firstOrNull()?.name ?: "New task"
-            }
+            task =
+                prompt.lineSequence().first().take(80).ifBlank {
+                    draftAttachments.firstOrNull()?.name ?: "New task"
+                }
         }
         history = repairedWorkHistory(history.toString())
         if (history.length() == 0 && messages.isNotEmpty()) {
@@ -603,22 +718,25 @@ class WorkModel(app: Application) : AndroidViewModel(app) {
                             if (message.attachments.isNotEmpty()) {
                                 put("_hydra_message_id", message.id)
                             }
-                        }
+                        },
                 )
             }
         }
         val previous = messages.lastOrNull { it.role == "assistant" && it.modelId.isNotEmpty() }
-        if (previous != null && (previous.modelId != connection.model || previous.providerName != connection.provider.label)) {
-            messages = messages + Message(
-                "model",
-                connection.selectedModel.name,
-                modelId = connection.model,
-                modelName = connection.selectedModel.name,
-                providerName = connection.provider.label,
-                previousModelId = previous.modelId,
-                previousModelName = previous.modelName,
-                previousProviderName = previous.providerName
-            )
+        if (previous != null &&
+            (previous.modelId != connection.model || previous.providerName != connection.provider.label)
+        ) {
+            messages = messages +
+                Message(
+                    "model",
+                    connection.selectedModel.name,
+                    modelId = connection.model,
+                    modelName = connection.selectedModel.name,
+                    providerName = connection.provider.label,
+                    previousModelId = previous.modelId,
+                    previousModelName = previous.modelName,
+                    previousProviderName = previous.providerName,
+                )
         }
         val user = Message("user", prompt, attachments = draftAttachments)
         history.put(
@@ -627,7 +745,7 @@ class WorkModel(app: Application) : AndroidViewModel(app) {
                 .put("content", prompt)
                 .apply {
                     if (draftAttachments.isNotEmpty()) put("_hydra_message_id", user.id)
-                }
+                },
         )
         messages = messages + user
         draftAttachments = emptyList()
@@ -637,7 +755,9 @@ class WorkModel(app: Application) : AndroidViewModel(app) {
         val initialDescription = ThinkingMessages.initialDescription(prompt)
         progress = initialDescription
         error = null
-        TaskProgressPipe.post(TaskProgressPipe.Live(activeId, task, progress, android.os.SystemClock.elapsedRealtime(), true))
+        TaskProgressPipe.post(
+            TaskProgressPipe.Live(activeId, task, progress, android.os.SystemClock.elapsedRealtime(), true),
+        )
         startThinkingCycle()
         runConnection = connection
         val current = ++runGeneration
@@ -656,267 +776,358 @@ class WorkModel(app: Application) : AndroidViewModel(app) {
         prefs.edit().putString("activeTitle", task).apply()
         checkpoint()
 
-        job = viewModelScope.launch {
-            streamDraftId = null
-            try {
-                if (!managedForeground) {
-                    context.startForegroundService(
-                        Intent(context, TaskService::class.java)
-                            .putExtra("conversationId", activeId)
-                    )
-                }
-                val turnStarted = android.os.SystemClock.elapsedRealtime()
-                repeat(24) {
-                    currentCoroutineContext().ensureActive()
-                    status = "Thinking"
-                    if (streamDraftId == null && thinkingJob?.isActive != true) {
-                        startThinkingCycle()
-                    }
-                    val started = android.os.SystemClock.elapsedRealtime()
-
-                    // The draft message is created lazily on the first streamed chunk,
-                    // so no duplicate "Thinking…" indicator is shown while waiting.
-                    var streamText = ""
-                    var streamThought = ""
-                    val response = withContext(Dispatchers.IO) {
-                        val wire = JSONArray().put(
-                            JSONObject().put("role", "system").put("content", systemPrompt())
+        job =
+            viewModelScope.launch {
+                streamDraftId = null
+                try {
+                    if (!managedForeground) {
+                        context.startForegroundService(
+                            Intent(context, TaskService::class.java)
+                                .putExtra("conversationId", activeId),
                         )
-                        val attached = messages.associate { it.id to it.attachments }
-                        for (i in 0 until history.length()) {
-                            val previousMessage = history.getJSONObject(i)
-                            wire.put(
-                                WorkAttachments.apiMessage(
-                                    context,
-                                    previousMessage,
-                                    attached[previousMessage.optString("_hydra_message_id")].orEmpty()
-                                )
-                            )
+                    }
+                    val turnStarted = android.os.SystemClock.elapsedRealtime()
+                    repeat(24) {
+                        currentCoroutineContext().ensureActive()
+                        status = "Thinking"
+                        if (streamDraftId == null && thinkingJob?.isActive != true) {
+                            startThinkingCycle()
                         }
-                        pendingImage?.let { image ->
-                            pendingImage = null
-                            wire.put(
-                                JSONObject()
-                                    .put("role", "user")
-                                    .put(
-                                        "content",
-                                        JSONArray()
-                                            .put(JSONObject().put("type", "text").put("text", "Image attached: ${image.path}. Use the image for the next response."))
-                                            .put(JSONObject().put("type", "image_url").put("image_url", JSONObject().put("url", "data:${image.mime};base64,${image.base64}")))
+                        val started = android.os.SystemClock.elapsedRealtime()
+
+                        // The draft message is created lazily on the first streamed chunk,
+                        // so no duplicate "Thinking…" indicator is shown while waiting.
+                        var streamText = ""
+                        var streamThought = ""
+                        val response =
+                            withContext(Dispatchers.IO) {
+                                val wire =
+                                    JSONArray().put(
+                                        JSONObject().put("role", "system").put("content", systemPrompt()),
                                     )
-                            )
-                        }
-                        val payload = JSONObject()
-                            .put("model", modelId)
-                            .put("messages", wire)
-                            .put("tools", WorkTools.schema())
-                            .put("tool_choice", "auto")
-                            .put("stream", true)
-                        if (provider != Provider.CUSTOM) {
-                            payload.put("stream_options", JSONObject().put("include_usage", true))
-                        }
-                        ReasoningPolicy.apply(payload, reasoningProfile, reasoningEffort)
-                        WorkStreamTurn(
-                            client,
-                            "$endpoint/chat/completions",
-                            credential,
-                            payload,
-                            provider,
-                            onCall = { active -> call = active },
-                            onThought = { thoughtSnapshot ->
-                                streamThought = thoughtSnapshot
-                                publishDraft(current, modelId, modelName, providerName, streamText, thoughtSnapshot)
+                                val attached = messages.associate { it.id to it.attachments }
+                                for (i in 0 until history.length()) {
+                                    val previousMessage = history.getJSONObject(i)
+                                    wire.put(
+                                        WorkAttachments.apiMessage(
+                                            context,
+                                            previousMessage,
+                                            attached[previousMessage.optString("_hydra_message_id")].orEmpty(),
+                                        ),
+                                    )
+                                }
+                                pendingImage?.let { image ->
+                                    pendingImage = null
+                                    wire.put(
+                                        JSONObject()
+                                            .put("role", "user")
+                                            .put(
+                                                "content",
+                                                JSONArray()
+                                                    .put(
+                                                        JSONObject()
+                                                            .put(
+                                                                "type",
+                                                                "text",
+                                                            ).put(
+                                                                "text",
+                                                                "Image attached: ${image.path}. Use the image for the next response.",
+                                                            ),
+                                                    ).put(
+                                                        JSONObject()
+                                                            .put(
+                                                                "type",
+                                                                "image_url",
+                                                            ).put(
+                                                                "image_url",
+                                                                JSONObject().put(
+                                                                    "url",
+                                                                    "data:${image.mime};base64,${image.base64}",
+                                                                ),
+                                                            ),
+                                                    ),
+                                            ),
+                                    )
+                                }
+                                val payload =
+                                    JSONObject()
+                                        .put("model", modelId)
+                                        .put("messages", wire)
+                                        .put("tools", WorkTools.schema())
+                                        .put("tool_choice", "auto")
+                                        .put("stream", true)
+                                if (provider != Provider.CUSTOM) {
+                                    payload.put("stream_options", JSONObject().put("include_usage", true))
+                                }
+                                ReasoningPolicy.apply(payload, reasoningProfile, reasoningEffort)
+                                WorkStreamTurn(
+                                    client,
+                                    "$endpoint/chat/completions",
+                                    credential,
+                                    payload,
+                                    provider,
+                                    onCall = { active -> call = active },
+                                    onThought = { thoughtSnapshot ->
+                                        streamThought = thoughtSnapshot
+                                        publishDraft(
+                                            current,
+                                            modelId,
+                                            modelName,
+                                            providerName,
+                                            streamText,
+                                            thoughtSnapshot,
+                                        )
+                                    },
+                                ) { snapshot ->
+                                    streamText = snapshot
+                                    publishDraft(current, modelId, modelName, providerName, snapshot, streamThought)
+                                }.run()
                             }
-                        ) { snapshot ->
-                            streamText = snapshot
-                            publishDraft(current, modelId, modelName, providerName, snapshot, streamThought)
-                        }.run()
-                    }
-                    currentCoroutineContext().ensureActive()
-                    val message = response.getJSONArray("choices")
-                        .getJSONObject(0)
-                        .getJSONObject("message")
-                    history.put(message)
-                    val rawText = if (message.isNull("content")) "" else message.optString("content", "")
-                    val rawThought = message.optString("reasoning_content").ifEmpty {
-                        message.optString("reasoning").ifEmpty {
-                            message.optString("thought")
+                        currentCoroutineContext().ensureActive()
+                        val message =
+                            response
+                                .getJSONArray("choices")
+                                .getJSONObject(0)
+                                .getJSONObject("message")
+                        history.put(message)
+                        val rawText = if (message.isNull("content")) "" else message.optString("content", "")
+                        val rawThought =
+                            message.optString("reasoning_content").ifEmpty {
+                                message.optString("reasoning").ifEmpty {
+                                    message.optString("thought")
+                                }
+                            }
+                        val (text, finalThought) = extractThought(rawText, rawThought.ifEmpty { streamThought })
+                        val toolCalls = message.optJSONArray("tool_calls")
+                        val hasToolCalls = toolCalls != null && toolCalls.length() > 0
+                        val tokens =
+                            response
+                                .optJSONObject("usage")
+                                ?.optInt("completion_tokens", -1) ?: -1
+                        val elapsed = (android.os.SystemClock.elapsedRealtime() - started).coerceAtLeast(1)
+                        val draftId = streamDraftId
+                        draftFlushJob?.cancel()
+                        draftFlushJob = null
+                        streamingId = null
+                        streamDraftId = null
+
+                        if (text.isNotBlank() || finalThought.isNotBlank()) {
+                            if (text.isNotBlank()) {
+                                progress =
+                                    text
+                                        .lineSequence()
+                                        .firstOrNull { it.isNotBlank() }
+                                        ?.trim()
+                                        ?.take(240)
+                                        .orEmpty()
+                                summary = text
+                                pipe()
+                            } else if (finalThought.isNotBlank()) {
+                                progress = "Reasoned"
+                            }
+                            val metrics =
+                                ResponseMetrics(
+                                    if (tokens > 0) {
+                                        tokens
+                                    } else {
+                                        kotlin.math
+                                            .ceil((text + finalThought).toByteArray().size / 4.0)
+                                            .toInt()
+                                            .coerceAtLeast(1)
+                                    },
+                                    elapsed,
+                                    tokens <= 0,
+                                    System.currentTimeMillis(),
+                                )
+                            val finalElapsed =
+                                if (!hasToolCalls) {
+                                    (android.os.SystemClock.elapsedRealtime() - turnStarted).coerceAtLeast(
+                                        1,
+                                    )
+                                } else {
+                                    metrics.elapsedMillis
+                                }
+                            val finalMetrics = metrics.copy(elapsedMillis = finalElapsed)
+                            if (draftId != null) {
+                                messages =
+                                    messages.map {
+                                        if (it.id == draftId) {
+                                            it.copy(
+                                                metrics = finalMetrics,
+                                                finalResponse = !hasToolCalls,
+                                                text = text,
+                                                thought = finalThought,
+                                            )
+                                        } else {
+                                            it
+                                        }
+                                    }
+                            } else {
+                                messages = messages +
+                                    Message(
+                                        "assistant",
+                                        text,
+                                        modelId = modelId,
+                                        modelName = modelName,
+                                        providerName = providerName,
+                                        metrics = finalMetrics,
+                                        finalResponse = !hasToolCalls,
+                                        thought = finalThought,
+                                    )
+                            }
+                        } else if (draftId != null) {
+                            messages = messages.filterNot { it.id == draftId }
                         }
+                        val calls = toolCalls
+                        if (calls == null || calls.length() == 0) {
+                            check(text.isNotBlank() || finalThought.isNotBlank()) {
+                                "The model returned no text or tool calls. Try another model or reasoning setting."
+                            }
+                            status = "Complete"
+                            checkpoint()
+                            return@launch
+                        }
+                        checkpoint()
+                        stopThinkingCycle()
+                        for (i in 0 until calls.length()) {
+                            currentCoroutineContext().ensureActive()
+                            val tool = calls.getJSONObject(i)
+                            val fn = tool.getJSONObject("function")
+                            val name = fn.getString("name")
+                            val args = fn.get("arguments").toString()
+                            val step = WorkStep(name, args)
+                            if (text.isBlank()) {
+                                progress =
+                                    toolLabel(
+                                        name,
+                                        runCatching { JSONObject(args) }.getOrDefault(JSONObject()),
+                                    )
+                                pipe()
+                            }
+                            steps = steps + step
+                            messages = messages + Message("tool", name, id = step.id, createdAt = step.createdAt)
+                            val allow =
+                                if (ToolPolicy.approval(approvalMode, name)) {
+                                    val pending = CompletableDeferred<Boolean>()
+                                    decision = pending
+                                    pendingApproval = step
+                                    status = "Needs approval"
+                                    checkpoint()
+                                    pending.await().also {
+                                        pendingApproval = null
+                                        decision = null
+                                    }
+                                } else {
+                                    true
+                                }
+                            val result =
+                                if (!allow) {
+                                    WorkToolResult(
+                                        "User declined this action. Do not retry it without new instructions.",
+                                    )
+                                } else {
+                                    status = "Running $name"
+                                    updateStep(step.id, "Running")
+                                    checkpoint()
+                                    try {
+                                        executeTool(name, JSONObject(args))
+                                    } catch (e: CancellationException) {
+                                        throw e
+                                    } catch (e: TermuxOfflineException) {
+                                        termuxPromptId = step.id
+                                        WorkToolResult("Tool error: ${e.message}")
+                                    } catch (e: Exception) {
+                                        WorkToolResult("Tool error: ${e.message ?: "Action failed."}")
+                                    }
+                                }
+                            currentCoroutineContext().ensureActive()
+                            changes = changes + result.changes
+                            updateStep(
+                                step.id,
+                                if (!allow) {
+                                    "Declined"
+                                } else if (result.failed || result.output.startsWith("Tool error:")) {
+                                    "Failed"
+                                } else {
+                                    "Done"
+                                },
+                                result.output.take(16000),
+                            )
+                            history.put(
+                                JSONObject()
+                                    .put("role", "tool")
+                                    .put("tool_call_id", tool.getString("id"))
+                                    .put("content", result.output.take(16000)),
+                            )
+                            checkpoint()
+                        }
+                        if (text.isBlank()) startThinkingCycle("Reviewing the results…")
                     }
-                    val (text, finalThought) = extractThought(rawText, rawThought.ifEmpty { streamThought })
-                    val toolCalls = message.optJSONArray("tool_calls")
-                    val hasToolCalls = toolCalls != null && toolCalls.length() > 0
-                    val tokens = response.optJSONObject("usage")
-                        ?.optInt("completion_tokens", -1) ?: -1
-                    val elapsed = (android.os.SystemClock.elapsedRealtime() - started).coerceAtLeast(1)
-                    val draftId = streamDraftId
+                    status = "Step limit reached"
+                    messages = messages +
+                        Message(
+                            "notice",
+                            "Paused after 24 model turns. Send a follow-up to continue from this conversation.",
+                        )
+                } catch (_: CancellationException) {
+                    markCancelled()
+                } catch (e: Exception) {
+                    if (cancellationRequested ||
+                        (e is java.io.IOException && isCancellationNotice(e.message.orEmpty()))
+                    ) {
+                        markCancelled()
+                    } else {
+                        status = "Failed"
+                        error = e.message ?: "Task failed. Check your connection."
+                        messages = messages + Message("notice", error ?: "Task failed.")
+                    }
+                } finally {
+                    stopThinkingCycle()
                     draftFlushJob?.cancel()
                     draftFlushJob = null
-                    streamingId = null
-                    streamDraftId = null
-
-                    if (text.isNotBlank() || finalThought.isNotBlank()) {
-                        if (text.isNotBlank()) {
-                            progress = text.lineSequence().firstOrNull { it.isNotBlank() }
-                                ?.trim()?.take(240).orEmpty()
-                            summary = text
-                            pipe()
-                        } else if (finalThought.isNotBlank()) {
-                            progress = "Reasoned"
+                    if (current == runGeneration) {
+                        // A failed or cancelled stream leaves an empty draft; partial text is kept.
+                        streamDraftId?.let { id ->
+                            messages = messages.filterNot { it.id == id && it.text.isBlank() && it.thought.isBlank() }
                         }
-                        val metrics = ResponseMetrics(
-                            if (tokens > 0) tokens else kotlin.math.ceil((text + finalThought).toByteArray().size / 4.0).toInt().coerceAtLeast(1),
-                            elapsed,
-                            tokens <= 0,
-                            System.currentTimeMillis()
-                        )
-                        val finalElapsed = if (!hasToolCalls) (android.os.SystemClock.elapsedRealtime() - turnStarted).coerceAtLeast(1) else metrics.elapsedMillis
-                        val finalMetrics = metrics.copy(elapsedMillis = finalElapsed)
-                        if (draftId != null) {
-                            messages = messages.map {
-                                if (it.id == draftId) it.copy(metrics = finalMetrics, finalResponse = !hasToolCalls, text = text, thought = finalThought) else it
+                        streamDraftId = null
+                        streamingId = null
+                        running = false
+                        pendingImage = null
+                        TaskProgressPipe.update {
+                            if (it.conversationId == activeId) {
+                                it.copy(running = false, headline = "")
+                            } else {
+                                it
                             }
-                        } else {
-                            messages = messages + Message(
-                                "assistant",
-                                text,
-                                modelId = modelId,
-                                modelName = modelName,
-                                providerName = providerName,
-                                metrics = finalMetrics,
-                                finalResponse = !hasToolCalls,
-                                thought = finalThought
-                            )
                         }
-                    } else if (draftId != null) {
-                        messages = messages.filterNot { it.id == draftId }
-                    }
-                    val calls = toolCalls
-                    if (calls == null || calls.length() == 0) {
-                        check(text.isNotBlank() || finalThought.isNotBlank()) {
-                            "The model returned no text or tool calls. Try another model or reasoning setting."
-                        }
-                        status = "Complete"
+                        pendingApproval = null
+                        decision = null
+                        call = null
+                        pendingQuestions = null
+                        questionDecision = null
+                        pendingDeviceAction = null
+                        deviceDecision = null
+                        steps =
+                            steps.map {
+                                if (it.state in listOf("Waiting", "Running")) {
+                                    it.copy(state = if (status == "Cancelled") "Cancelled" else "Interrupted")
+                                } else {
+                                    it
+                                }
+                            }
+                        history = repairedWorkHistory(history.toString())
                         checkpoint()
-                        return@launch
-                    }
-                    checkpoint()
-                    stopThinkingCycle()
-                    for (i in 0 until calls.length()) {
-                        currentCoroutineContext().ensureActive()
-                        val tool = calls.getJSONObject(i)
-                        val fn = tool.getJSONObject("function")
-                        val name = fn.getString("name")
-                        val args = fn.get("arguments").toString()
-                        val step = WorkStep(name, args)
-                        if (text.isBlank()) {
-                            progress = toolLabel(
-                                name,
-                                runCatching { JSONObject(args) }.getOrDefault(JSONObject())
-                            )
-                            pipe()
+                        persistRecords()
+                        prefs.edit().putBoolean("active", false).apply()
+                        if (!managedForeground && !engine.hasActiveRuns()) {
+                            context.stopService(Intent(context, TaskService::class.java))
                         }
-                        steps = steps + step
-                        messages = messages + Message("tool", name, id = step.id, createdAt = step.createdAt)
-                        val allow = if (ToolPolicy.approval(approvalMode, name)) {
-                            val pending = CompletableDeferred<Boolean>()
-                            decision = pending
-                            pendingApproval = step
-                            status = "Needs approval"
-                            checkpoint()
-                            pending.await().also {
-                                pendingApproval = null
-                                decision = null
-                            }
-                        } else {
-                            true
-                        }
-                        val result = if (!allow) {
-                            WorkToolResult("User declined this action. Do not retry it without new instructions.")
-                        } else {
-                            status = "Running $name"
-                            updateStep(step.id, "Running")
-                            checkpoint()
-                            try {
-                                executeTool(name, JSONObject(args))
-                            } catch (e: CancellationException) {
-                                throw e
-                            } catch (e: Exception) {
-                                WorkToolResult("Tool error: ${e.message ?: "Action failed."}")
-                            }
-                        }
-                        currentCoroutineContext().ensureActive()
-                        changes = changes + result.changes
-                        updateStep(
-                            step.id,
-                            if (!allow) "Declined" else if (result.failed || result.output.startsWith("Tool error:")) "Failed" else "Done",
-                            result.output.take(16000)
-                        )
-                        history.put(
-                            JSONObject()
-                                .put("role", "tool")
-                                .put("tool_call_id", tool.getString("id"))
-                                .put("content", result.output.take(16000))
-                        )
-                        checkpoint()
+                        if (mode == ApprovalMode.SESSION) mode = ApprovalMode.CHANGES
+                        completion.complete(WorkRunOutcome(status, error.orEmpty()))
                     }
-                    if (text.isBlank()) startThinkingCycle("Reviewing the results…")
-                }
-                status = "Step limit reached"
-                messages = messages + Message(
-                    "notice",
-                    "Paused after 24 model turns. Send a follow-up to continue from this conversation."
-                )
-            } catch (_: CancellationException) {
-                markCancelled()
-            } catch (e: Exception) {
-                if (cancellationRequested || (e is java.io.IOException && isCancellationNotice(e.message.orEmpty()))) {
-                    markCancelled()
-                } else {
-                    status = "Failed"
-                    error = e.message ?: "Task failed. Check your connection."
-                    messages = messages + Message("notice", error ?: "Task failed.")
-                }
-            } finally {
-                stopThinkingCycle()
-                draftFlushJob?.cancel()
-                draftFlushJob = null
-                if (current == runGeneration) {
-                    // A failed or cancelled stream leaves an empty draft; partial text is kept.
-                    streamDraftId?.let { id ->
-                        messages = messages.filterNot { it.id == id && it.text.isBlank() && it.thought.isBlank() }
-                    }
-                    streamDraftId = null
-                    streamingId = null
-                    running = false
-                    pendingImage = null
-                    TaskProgressPipe.update { if (it.conversationId == activeId) it.copy(running = false, headline = "") else it }
-                    pendingApproval = null
-                    decision = null
-                    call = null
-                    pendingQuestions = null
-                    questionDecision = null
-                    pendingDeviceAction = null
-                    deviceDecision = null
-                    steps = steps.map {
-                        if (it.state in listOf("Waiting", "Running")) {
-                            it.copy(state = if (status == "Cancelled") "Cancelled" else "Interrupted")
-                        } else {
-                            it
-                        }
-                    }
-                    history = repairedWorkHistory(history.toString())
-                    checkpoint()
-                    persistRecords()
-                    prefs.edit().putBoolean("active", false).apply()
-                    if (!managedForeground && !engine.hasActiveRuns()) {
-                        context.stopService(Intent(context, TaskService::class.java))
-                    }
-                    if (mode == ApprovalMode.SESSION) mode = ApprovalMode.CHANGES
-                    completion.complete(WorkRunOutcome(status, error.orEmpty()))
                 }
             }
-        }
         return true
     }
 
@@ -932,16 +1143,17 @@ class WorkModel(app: Application) : AndroidViewModel(app) {
             progress = initial
             pipe(initial)
         }
-        thinkingJob = viewModelScope.launch {
-            val iterator = ThinkingMessages.shuffledSequence().iterator()
-            while (isActive) {
-                delay(ThinkingMessages.CYCLE_INTERVAL_MS)
-                if (status != "Thinking" || !running || streamDraftId != null) break
-                val next = iterator.next()
-                progress = next
-                pipe(next)
+        thinkingJob =
+            viewModelScope.launch {
+                val iterator = ThinkingMessages.shuffledSequence().iterator()
+                while (isActive) {
+                    delay(ThinkingMessages.CYCLE_INTERVAL_MS)
+                    if (status != "Thinking" || !running || streamDraftId != null) break
+                    val next = iterator.next()
+                    progress = next
+                    pipe(next)
+                }
             }
-        }
     }
 
     private fun stopThinkingCycle() {
@@ -956,7 +1168,7 @@ class WorkModel(app: Application) : AndroidViewModel(app) {
         modelName: String,
         providerName: String,
         text: String,
-        thought: String = ""
+        thought: String = "",
     ) {
         if (generation != runGeneration) return
         stopThinkingCycle()
@@ -971,13 +1183,14 @@ class WorkModel(app: Application) : AndroidViewModel(app) {
             pendingDraftText = text
             pendingDraftThought = thought
             if (draftFlushJob?.isActive != true) {
-                draftFlushJob = viewModelScope.launch {
-                    delay(32L)
-                    val pText = pendingDraftText ?: text
-                    val pThought = pendingDraftThought ?: thought
-                    lastDraftPush = android.os.SystemClock.elapsedRealtime()
-                    dispatchDraft(generation, modelId, modelName, providerName, pText, pThought)
-                }
+                draftFlushJob =
+                    viewModelScope.launch {
+                        delay(32L)
+                        val pText = pendingDraftText ?: text
+                        val pThought = pendingDraftThought ?: thought
+                        lastDraftPush = android.os.SystemClock.elapsedRealtime()
+                        dispatchDraft(generation, modelId, modelName, providerName, pText, pThought)
+                    }
             }
         }
     }
@@ -988,25 +1201,34 @@ class WorkModel(app: Application) : AndroidViewModel(app) {
         modelName: String,
         providerName: String,
         text: String,
-        thought: String
+        thought: String,
     ) {
         withContext(Dispatchers.Main) {
             if (generation != runGeneration) return@withContext
             val id = streamDraftId
             if (id == null) {
-                val draft = Message(
-                    "assistant",
-                    text,
-                    modelId = modelId,
-                    modelName = modelName,
-                    providerName = providerName,
-                    thought = thought
-                )
+                val draft =
+                    Message(
+                        "assistant",
+                        text,
+                        modelId = modelId,
+                        modelName = modelName,
+                        providerName = providerName,
+                        thought = thought,
+                        finalResponse = false,
+                    )
                 streamDraftId = draft.id
                 streamingId = draft.id
                 messages = messages + draft
             } else {
-                messages = messages.map { if (it.id == id) it.copy(text = text, thought = thought) else it }
+                messages =
+                    messages.map {
+                        if (it.id == id) {
+                            it.copy(text = text, thought = thought, finalResponse = false)
+                        } else {
+                            it
+                        }
+                    }
             }
             text.lineSequence().firstOrNull { it.isNotBlank() }?.trim()?.take(240)?.let { headline ->
                 if (progress != headline) progress = headline
@@ -1023,23 +1245,32 @@ class WorkModel(app: Application) : AndroidViewModel(app) {
     private fun markCancelled() {
         status = "Cancelled"
         error = null
-        val shellRunning = steps.any {
-            it.state == "Running" && it.tool in setOf("run_command", "git_status", "git_diff")
-        }
+        val shellRunning =
+            steps.any {
+                it.state == "Running" && it.tool in setOf("run_command", "git_status", "git_diff")
+            }
         toastEvents.tryEmit(
             WorkToast(
                 activeId,
-                if (shellRunning) "Task cancelled. Check Termux for any command still running."
-                else "Task cancelled."
-            )
+                if (shellRunning) {
+                    "Task cancelled. Check Termux for any command still running."
+                } else {
+                    "Task cancelled."
+                },
+            ),
         )
     }
 
-    private fun updateStep(id: String, state: String, output: String = "") {
+    private fun updateStep(
+        id: String,
+        state: String,
+        output: String = "",
+    ) {
         steps = steps.map { if (it.id == id) it.copy(state = state, output = output) else it }
     }
 
-    private fun systemPrompt() = """
+    private fun systemPrompt() =
+        """
         You are Hydra, a careful coding and research agent running as an Android app on the user's Android phone or tablet. Continue the same saved conversation across follow-up messages.
         Selected project: ${if (projectUri == null) "none; ask the user to choose a folder before using project or shell tools" else projectName}.
         Use actual tools to inspect files, edit code, run tests, and research public websites. Work relative to the selected project.
@@ -1057,128 +1288,213 @@ class WorkModel(app: Application) : AndroidViewModel(app) {
         Search efficiently: batch independent queries, filter to authoritative domains when useful, use time_range for fresh information, and find_in_page to locate relevant passages. Cite source URLs and avoid repeating cached queries without a reason.
         Use get_time before interpreting dates. wait_for and wait_until pause this run for up to five minutes without blocking the UI. For longer delays, use schedule_task to add a future follow-up in this conversation. Schedules are inexact Android background jobs and may run late. Never promise exact alarm timing. Recurring schedules use fixed intervals, not local-calendar or cron rules. Scheduling never authorizes future tool actions beyond the current approval policy.
         start_task launches an independent read-only background task (web research or project inspection; it cannot write files, run commands, use device tools, or ask questions) and returns a task ID. Poll it with read_task_output instead of assuming completion, and at most three background tasks run at once.
-    """.trimIndent()
+        """.trimIndent()
 
-    private suspend fun executeTool(name: String, args: JSONObject): WorkToolResult = when (name) {
-        "get_time" -> WorkToolResult(ScheduleTools.currentTime())
-        "wait_for", "wait_until" -> {
-            val duration = ScheduleTools.waitMillis(name, args)
-            status = "Waiting"
-            progress = "Waiting until ${java.time.Instant.ofEpochMilli(System.currentTimeMillis() + duration)}"
-            checkpoint()
-            val started = android.os.SystemClock.elapsedRealtime()
-            delay(duration)
-            WorkToolResult(
-                JSONObject()
-                    .put("status", "wait_complete")
-                    .put("elapsed_ms", android.os.SystemClock.elapsedRealtime() - started)
-                    .put("time", JSONObject(ScheduleTools.currentTime()))
-                    .toString()
-            )
-        }
-        "schedule_task", "update_scheduled_task", "cancel_scheduled_task", "list_scheduled_tasks" -> {
-            val schedules = (getApplication<Application>() as HydraApplication).schedules
-            WorkToolResult(
-                when (name) {
-                    "schedule_task" -> schedules.create(args, activeId, runConnection ?: error("No active connection.")).json(public = true).toString()
-                    "update_scheduled_task" -> schedules.update(args, runConnection ?: error("No active connection.")).json(public = true).toString()
-                    "cancel_scheduled_task" -> schedules.cancel(args.getString("id")).json(public = true).toString()
-                    else -> {
-                        val offset = args.optInt("offset", 0)
-                        require(offset in 0..100)
-                        JSONObject()
-                            .put("schedules", org.json.JSONArray().apply {
-                                schedules.records.drop(offset).take(20).forEach { put(it.json(public = true)) }
-                            })
-                            .put("next_offset", if (offset + 20 < schedules.records.size) offset + 20 else JSONObject.NULL)
-                            .toString()
+    private suspend fun executeTool(
+        name: String,
+        args: JSONObject,
+    ): WorkToolResult =
+        when (name) {
+            "get_time" -> {
+                WorkToolResult(ScheduleTools.currentTime())
+            }
+
+            "wait_for", "wait_until" -> {
+                val duration = ScheduleTools.waitMillis(name, args)
+                status = "Waiting"
+                progress = "Waiting until ${java.time.Instant.ofEpochMilli(System.currentTimeMillis() + duration)}"
+                checkpoint()
+                val started = android.os.SystemClock.elapsedRealtime()
+                delay(duration)
+                WorkToolResult(
+                    JSONObject()
+                        .put("status", "wait_complete")
+                        .put("elapsed_ms", android.os.SystemClock.elapsedRealtime() - started)
+                        .put("time", JSONObject(ScheduleTools.currentTime()))
+                        .toString(),
+                )
+            }
+
+            "schedule_task", "update_scheduled_task", "cancel_scheduled_task", "list_scheduled_tasks" -> {
+                val schedules = (getApplication<Application>() as HydraApplication).schedules
+                WorkToolResult(
+                    when (name) {
+                        "schedule_task" -> {
+                            schedules
+                                .create(
+                                    args,
+                                    activeId,
+                                    runConnection ?: error("No active connection."),
+                                ).json(public = true)
+                                .toString()
+                        }
+
+                        "update_scheduled_task" -> {
+                            schedules
+                                .update(
+                                    args,
+                                    runConnection ?: error("No active connection."),
+                                ).json(public = true)
+                                .toString()
+                        }
+
+                        "cancel_scheduled_task" -> {
+                            schedules.cancel(args.getString("id")).json(public = true).toString()
+                        }
+
+                        else -> {
+                            val offset = args.optInt("offset", 0)
+                            require(offset in 0..100)
+                            JSONObject()
+                                .put(
+                                    "schedules",
+                                    org.json.JSONArray().apply {
+                                        schedules.records
+                                            .drop(offset)
+                                            .take(20)
+                                            .forEach { put(it.json(public = true)) }
+                                    },
+                                ).put(
+                                    "next_offset",
+                                    if (offset + 20 < schedules.records.size) {
+                                        offset + 20
+                                    } else {
+                                        JSONObject.NULL
+                                    },
+                                ).toString()
+                        }
+                    },
+                )
+            }
+
+            "ask_user" -> {
+                val request = QuestionTool.parse(args)
+                val answer = CompletableDeferred<String>()
+                questionDecision = answer
+                pendingQuestions = request
+                status = "Needs your answer"
+                progress = request.questions.first().title
+                checkpoint()
+                try {
+                    WorkToolResult(answer.await())
+                } finally {
+                    if (pendingQuestions?.id == request.id) pendingQuestions = null
+                    questionDecision = null
+                }
+            }
+
+            in DeviceTools.names -> {
+                val request = DeviceActionRequest(name, args.toString())
+                val result = CompletableDeferred<WorkToolResult>()
+                deviceDecision = result
+                pendingDeviceAction = request
+                status = "Waiting for device"
+                progress = "Open this task to use device tools"
+                checkpoint()
+                try {
+                    result.await()
+                } finally {
+                    if (pendingDeviceAction?.id == request.id) pendingDeviceAction = null
+                    deviceDecision = null
+                }
+            }
+
+            "web_search" -> {
+                withContext(Dispatchers.IO) {
+                    WorkToolResult(web.search(args.getString("query"), SearchOptions.fromJson(args)))
+                }
+            }
+
+            "web_search_batch" -> {
+                withContext(Dispatchers.IO) {
+                    val queries = args.getJSONArray("queries")
+                    WorkToolResult(
+                        web.searchBatch(
+                            (0 until queries.length()).map { queries.getString(it) },
+                            SearchOptions.fromJson(args),
+                        ),
+                    )
+                }
+            }
+
+            "find_in_page" -> {
+                withContext(Dispatchers.IO) {
+                    WorkToolResult(
+                        web.find(args.getString("url"), args.getString("query"), args.optInt("max_matches", 6)),
+                    )
+                }
+            }
+
+            "fetch_url" -> {
+                withContext(Dispatchers.IO) {
+                    WorkToolResult(
+                        web.fetch(args.getString("url"), args.optInt("max_chars", 10000), args.optInt("offset", 0)),
+                    )
+                }
+            }
+
+            "start_task" -> {
+                val connection = runConnection ?: error("No active connection.")
+                val taskId =
+                    engine.start(
+                        args.getString("title"),
+                        args.getString("prompt"),
+                        connection,
+                        projectUri,
+                        projectName,
+                        directory,
+                    )
+                WorkToolResult(
+                    JSONObject()
+                        .put("task_id", taskId)
+                        .put("status", "started")
+                        .put(
+                            "note",
+                            "The background task runs read-only research in its own conversation. Poll it with read_task_output; it never writes files or runs commands.",
+                        ).toString(),
+                )
+            }
+
+            "read_task_output" -> {
+                engine.readOutput(args.getString("id"))
+            }
+
+            "read_image" -> {
+                check(projectUri != null) { "Select a project folder first." }
+                val image = withContext(Dispatchers.IO) { projectTools().readImage(args.optString("path", "")) }
+                pendingImage = image
+                WorkToolResult(
+                    "Read ${image.path} (${image.mime}, ${image.bytes} bytes). The image is attached to the next request; answer using it now.",
+                )
+            }
+
+            "run_command", "git_status", "git_diff" -> {
+                check(projectUri != null) { "Select a project folder first." }
+                val command =
+                    when (name) {
+                        "git_status" -> {
+                            "git status --short --branch"
+                        }
+
+                        "git_diff" -> {
+                            val path = args.optString("path")
+                            ToolPolicy.parts(path)
+                            "git diff --no-ext-diff --no-color" +
+                                (if (args.optBoolean("staged")) " --cached" else "") +
+                                " --" + (if (path.isNotBlank()) " '" + path.replace("'", "'\\''") + "'" else "")
+                        }
+
+                        else -> {
+                            args.getString("command")
+                        }
                     }
-                }
-            )
-        }
-        "ask_user" -> {
-            val request = QuestionTool.parse(args)
-            val answer = CompletableDeferred<String>()
-            questionDecision = answer
-            pendingQuestions = request
-            status = "Needs your answer"
-            progress = request.questions.first().title
-            checkpoint()
-            try {
-                WorkToolResult(answer.await())
-            } finally {
-                if (pendingQuestions?.id == request.id) pendingQuestions = null
-                questionDecision = null
+                val result = TermuxBridge.execute(getApplication(), directory, command)
+                WorkToolResult(result.render(), failed = result.exitCode != 0)
+            }
+
+            else -> {
+                require(name in WorkTools.names) { "Unknown tool: $name" }
+                runInterruptible(Dispatchers.IO) { projectTools().execute(name, args) }
             }
         }
-        in DeviceTools.names -> {
-            val request = DeviceActionRequest(name, args.toString())
-            val result = CompletableDeferred<WorkToolResult>()
-            deviceDecision = result
-            pendingDeviceAction = request
-            status = "Waiting for device"
-            progress = "Open this task to use device tools"
-            checkpoint()
-            try {
-                result.await()
-            } finally {
-                if (pendingDeviceAction?.id == request.id) pendingDeviceAction = null
-                deviceDecision = null
-            }
-        }
-        "web_search" -> withContext(Dispatchers.IO) {
-            WorkToolResult(web.search(args.getString("query"), SearchOptions.fromJson(args)))
-        }
-        "web_search_batch" -> withContext(Dispatchers.IO) {
-            val queries = args.getJSONArray("queries")
-            WorkToolResult(web.searchBatch((0 until queries.length()).map { queries.getString(it) }, SearchOptions.fromJson(args)))
-        }
-        "find_in_page" -> withContext(Dispatchers.IO) {
-            WorkToolResult(web.find(args.getString("url"), args.getString("query"), args.optInt("max_matches", 6)))
-        }
-        "fetch_url" -> withContext(Dispatchers.IO) {
-            WorkToolResult(web.fetch(args.getString("url"), args.optInt("max_chars", 10000), args.optInt("offset", 0)))
-        }
-        "start_task" -> {
-            val connection = runConnection ?: error("No active connection.")
-            val taskId = engine.start(
-                args.getString("title"), args.getString("prompt"), connection,
-                projectUri, projectName, directory
-            )
-            WorkToolResult(
-                JSONObject()
-                    .put("task_id", taskId)
-                    .put("status", "started")
-                    .put("note", "The background task runs read-only research in its own conversation. Poll it with read_task_output; it never writes files or runs commands.")
-                    .toString()
-            )
-        }
-        "read_task_output" -> engine.readOutput(args.getString("id"))
-        "read_image" -> {
-            check(projectUri != null) { "Select a project folder first." }
-            val image = withContext(Dispatchers.IO) { projectTools().readImage(args.optString("path", "")) }
-            pendingImage = image
-            WorkToolResult("Read ${image.path} (${image.mime}, ${image.bytes} bytes). The image is attached to the next request; answer using it now.")
-        }
-        "run_command", "git_status", "git_diff" -> {
-            check(projectUri != null) { "Select a project folder first." }
-            val command = when (name) {
-                "git_status" -> "git status --short --branch"
-                "git_diff" -> {
-                    val path = args.optString("path")
-                    ToolPolicy.parts(path)
-                    "git diff --no-ext-diff --no-color" +
-                        (if (args.optBoolean("staged")) " --cached" else "") +
-                        " --" + (if (path.isNotBlank()) " '" + path.replace("'", "'\\''") + "'" else "")
-                }
-                else -> args.getString("command")
-            }
-            val result = TermuxBridge.execute(getApplication(), directory, command)
-            WorkToolResult(result.render(), failed = result.exitCode != 0)
-        }
-        else -> {
-            require(name in WorkTools.names) { "Unknown tool: $name" }
-            runInterruptible(Dispatchers.IO) { projectTools().execute(name, args) }
-        }
-    }
 }
