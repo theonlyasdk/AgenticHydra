@@ -74,8 +74,8 @@ class WorkHarnessTest {
         assertEquals(4, repaired.length())
         assertEquals("b", repaired.getJSONObject(3).getString("tool_call_id"))
         assertEquals(repaired.toString(), repairedWorkHistory(repaired.toString()).toString())
-        assertEquals(53, WorkTools.schema().length())
-        assertEquals(53, WorkTools.names.distinct().size)
+        assertEquals(55, WorkTools.schema().length())
+        assertEquals(55, WorkTools.names.distinct().size)
         listOf(
             "append_file",
             "replace_in_file",

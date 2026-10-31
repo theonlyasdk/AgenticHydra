@@ -39,6 +39,14 @@
 - One primary action per screen. Others are tonal, outlined, or text buttons.
 - Touch targets at least 48dp. Every icon has a contentDescription (or null if decorative).
 - Use Material Symbols / icons consistently, with one style (Rounded or Outlined).
+- Every popup menu, overflow menu, and dropdown uses the shared rounded popup
+  `HydraOverflowMenu` with `HydraMenuItem` rows from `HydraComponents.kt`
+  (large shape, `surfaceContainerHigh`, optional header). Never build a raw
+  `DropdownMenu`, `Popup`, or one-off menu surface in a screen; add options or
+  parameters to that shared component instead so every popup looks identical.
+- Every options/overflow entry point uses the horizontal three-dot icon
+  (`Icons.Outlined.MoreHoriz`). Never use the vertical `MoreVert` icon; the
+  horizontal dots are mandatory across the whole app.
 
 ## Shape and motion
 - Hard limit: bottom sheets have no drag handle or reserved handle space. In Models, only header drags may move/dismiss the sheet; body/list gestures must stay within the content.

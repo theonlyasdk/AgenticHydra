@@ -2,11 +2,12 @@ package app.agentichydra
 
 import android.content.res.Configuration
 import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.combinedClickable
-import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
@@ -20,8 +21,8 @@ import androidx.compose.ui.MotionDurationScale
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.semantics.selected
@@ -31,9 +32,12 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.IntRect
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Popup
+import androidx.compose.ui.window.PopupPositionProvider
 import kotlinx.coroutines.delay
 import kotlin.math.ceil
 
@@ -91,7 +95,30 @@ data class ConversationRowUiState(
     val selected: Boolean,
 )
 
-/** Icon-only button that reveals a short hint when long-pressed. */
+/**
+ * Places the hint above the anchor, clamped to the window, and drops it below only when the
+ * anchor sits too close to the top edge, so the bubble never covers the pressed button.
+ */
+private class HintPositionProvider(
+    private val gap: Int,
+    private val margin: Int,
+) : PopupPositionProvider {
+    override fun calculatePosition(
+        anchorBounds: IntRect,
+        windowSize: IntSize,
+        layoutDirection: LayoutDirection,
+        popupContentSize: IntSize,
+    ): IntOffset {
+        val maxX = (windowSize.width - popupContentSize.width - margin).coerceAtLeast(margin)
+        val x = (anchorBounds.center.x - popupContentSize.width / 2).coerceIn(margin, maxX)
+        val above = anchorBounds.top - popupContentSize.height - gap
+        val maxY = (windowSize.height - popupContentSize.height - margin).coerceAtLeast(margin)
+        val y = if (above >= margin) above else (anchorBounds.bottom + gap).coerceIn(margin, maxY)
+        return IntOffset(x, y)
+    }
+}
+
+/** Icon-only button that reveals a short hint above itself when long-pressed. */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun HintIconButton(
@@ -110,6 +137,20 @@ fun HintIconButton(
             show = false
         }
     }
+    val density = LocalDensity.current
+    val positionProvider = remember(density) {
+        with(density) { HintPositionProvider(gap = 8.dp.roundToPx(), margin = 8.dp.roundToPx()) }
+    }
+    val alpha = animateFloatAsState(
+        targetValue = if (show) 1f else 0f,
+        animationSpec = spring(stiffness = 900f),
+        label = "hintAlpha",
+    )
+    val scale = animateFloatAsState(
+        targetValue = if (show) 1f else 0.9f,
+        animationSpec = spring(stiffness = 900f),
+        label = "hintScale",
+    )
     Box(modifier) {
         Box(
             Modifier.size(48.dp).combinedClickable(onClick = onClick, onClickLabel = onClickLabel, onLongClick = {
@@ -117,10 +158,16 @@ fun HintIconButton(
             }),
             contentAlignment = Alignment.Center,
         ) { Icon(icon, description) }
-        if (show) {
-            val density = LocalDensity.current
-            Popup(alignment = Alignment.TopCenter, offset = IntOffset(0, -with(density) { 8.dp.roundToPx() })) {
+        if (show || alpha.value > 0f) {
+            Popup(popupPositionProvider = positionProvider) {
                 Surface(
+                    modifier = Modifier
+                        .graphicsLayer {
+                            this.alpha = alpha.value
+                            scaleX = scale.value
+                            scaleY = scale.value
+                        }
+                        .widthIn(max = 240.dp),
                     color = cs.surfaceContainerHighest,
                     shape = MaterialTheme.shapes.medium,
                     shadowElevation = 2.dp,
@@ -134,33 +181,6 @@ fun HintIconButton(
                 }
             }
         }
-    }
-}
-
-/** The standard 3-dot overflow popup used across sidebar, task chat and schedule sheets. */
-@Composable
-fun HydraOverflowMenu(
-    expanded: Boolean,
-    onDismiss: () -> Unit,
-    headerText: String? = null,
-    content: @Composable androidx.compose.foundation.layout.ColumnScope.() -> Unit,
-) {
-    val cs = MaterialTheme.colorScheme
-    DropdownMenu(
-        expanded = expanded,
-        onDismissRequest = onDismiss,
-        shape = MaterialTheme.shapes.large,
-        containerColor = cs.surfaceContainerHigh,
-    ) {
-        headerText?.let { header ->
-            Text(
-                header,
-                style = MaterialTheme.typography.labelLarge,
-                color = cs.onSurfaceVariant,
-                modifier = Modifier.widthIn(max = 280.dp).padding(horizontal = 16.dp, vertical = 12.dp),
-            )
-        }
-        content()
     }
 }
 
@@ -232,30 +252,18 @@ fun ConversationHistoryRow(
                 trailingContent = {
                     IconButton(onClick = { menu = true }) { Icon(Icons.Outlined.MoreHoriz, "Conversation options") }
                     HydraOverflowMenu(expanded = menu, onDismiss = { menu = false }, headerText = state.title) {
-                        DropdownMenuItem(text = {
-                            Text(
-                                "Rename",
-                            )
-                        }, leadingIcon = { Icon(Icons.Outlined.Edit, null) }, onClick = {
+                        HydraMenuItem("Rename", Icons.Outlined.Edit) {
                             menu = false
                             onRename()
-                        })
-                        DropdownMenuItem(text = {
-                            Text(
-                                "Export",
-                            )
-                        }, leadingIcon = { Icon(Icons.Outlined.FileDownload, null) }, onClick = {
+                        }
+                        HydraMenuItem("Export", Icons.Outlined.FileDownload) {
                             menu = false
                             onExport()
-                        })
-                        DropdownMenuItem(text = {
-                            Text(
-                                "Delete",
-                            )
-                        }, leadingIcon = { Icon(Icons.Outlined.DeleteOutline, null) }, onClick = {
+                        }
+                        HydraMenuItem("Delete", Icons.Outlined.DeleteOutline) {
                             menu = false
                             onDelete()
-                        })
+                        }
                     }
                 },
                 colors =

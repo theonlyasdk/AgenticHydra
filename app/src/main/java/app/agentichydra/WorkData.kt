@@ -15,6 +15,65 @@ internal fun isCancellationNotice(text: String): Boolean {
         clean.startsWith("stopped. commands already launched in termux")
 }
 
+/** A step the engine queued or started but never reported an outcome for. */
+internal fun WorkStep.isPending(): Boolean = state == "Waiting" || state == "Running"
+
+/** Gives every unfinished step an honest end state when a run stops, fails, or is interrupted. */
+internal fun List<WorkStep>.markPendingStepsAs(state: String): List<WorkStep> = map { if (it.isPending()) it.copy(state = state) else it }
+
+data class GroupedToolMessages(
+    val messages: List<Message>,
+    val reads: Map<String, List<WorkStep>>,
+)
+
+/**
+ * Collapses consecutive reads of the same file into one timeline row.
+ * Line ranges and other arguments may differ; only the path decides the group.
+ */
+internal fun groupReadFileReads(
+    messages: List<Message>,
+    steps: List<WorkStep>,
+): GroupedToolMessages {
+    val stepById = steps.associateBy { it.id }
+    val reads = mutableMapOf<String, List<WorkStep>>()
+    val display = mutableListOf<Message>()
+    var index = 0
+    while (index < messages.size) {
+        val message = messages[index]
+        val step = stepById[message.id]
+        val path = step?.readFilePath()
+        if (message.role != "tool" || path == null) {
+            display += message
+            index++
+            continue
+        }
+        val group = mutableListOf(step)
+        var end = index
+        while (end + 1 < messages.size) {
+            val next = messages[end + 1]
+            val nextStep = stepById[next.id]
+            if (next.role != "tool" || nextStep == null || nextStep.readFilePath() != path) break
+            group += nextStep
+            end++
+        }
+        display += message
+        if (group.size > 1) reads[message.id] = group
+        index = end + 1
+    }
+    return GroupedToolMessages(display, reads)
+}
+
+private fun WorkStep.readFilePath(): String? =
+    runCatching { JSONObject(arguments).optString("path").trim() }.getOrNull()?.takeIf {
+        tool == "read_file" && it.isNotEmpty()
+    }
+
+/** Newest-first conversation history, replacing any earlier copy of the same record. */
+internal fun List<WorkRecord>.upserted(record: WorkRecord): List<WorkRecord> =
+    (listOf(record) + filterNot { it.id == record.id }).take(MAX_SAVED_WORK_RECORDS)
+
+internal const val MAX_SAVED_WORK_RECORDS = 40
+
 enum class ApprovalMode(
     val title: String,
     val detail: String,
@@ -54,10 +113,42 @@ object ToolPolicy {
         return parts
     }
 
+    fun isRead(tool: String): Boolean =
+        tool in readTools || (app.agentichydra.mcp.McpToolRouter.registry?.readOnlyToolNames()?.contains(tool) == true)
+
     fun approval(
         mode: ApprovalMode,
         tool: String,
-    ) = tool != "ask_user" && (mode == ApprovalMode.EVERY || (mode == ApprovalMode.CHANGES && tool !in readTools))
+    ) = tool !in setOf("ask_user", "quiz_user") &&
+        (mode == ApprovalMode.EVERY || (mode == ApprovalMode.CHANGES && !isRead(tool)))
+}
+
+/** Live byte counters for a native file download. */
+data class DownloadProgress(
+    val path: String = "",
+    val downloaded: Long = 0,
+    val total: Long = 0,
+    val elapsedMs: Long = 0,
+    val bytesPerSecond: Long = 0,
+) {
+    fun json() =
+        JSONObject()
+            .put("path", path)
+            .put("downloaded", downloaded)
+            .put("total", total)
+            .put("elapsedMs", elapsedMs)
+            .put("bytesPerSecond", bytesPerSecond)
+
+    companion object {
+        fun fromJson(o: JSONObject) =
+            DownloadProgress(
+                o.optString("path"),
+                o.optLong("downloaded"),
+                o.optLong("total"),
+                o.optLong("elapsedMs"),
+                o.optLong("bytesPerSecond"),
+            )
+    }
 }
 
 data class WorkStep(
@@ -67,6 +158,7 @@ data class WorkStep(
     val output: String = "",
     val id: String = UUID.randomUUID().toString(),
     val createdAt: Long = System.currentTimeMillis(),
+    val download: DownloadProgress? = null,
 ) {
     fun json() =
         JSONObject()
@@ -75,9 +167,10 @@ data class WorkStep(
                 tool,
             ).put("args", arguments)
             .put("state", state)
-            .put("output", output.take(16000))
+            .put("output", output.take(MAX_TOOL_OUTPUT))
             .put("id", id)
             .put("createdAt", createdAt)
+            .apply { download?.let { put("download", it.json()) } }
 
     companion object {
         fun fromJson(o: JSONObject) =
@@ -88,6 +181,7 @@ data class WorkStep(
                 o.optString("output"),
                 o.optString("id").ifBlank { UUID.randomUUID().toString() },
                 o.optLong("createdAt", 0),
+                o.optJSONObject("download")?.let(DownloadProgress::fromJson),
             )
     }
 }
@@ -113,11 +207,14 @@ data class WorkRecord(
     val projectName: String = "No project selected",
     val directory: String = "",
     val updatedAt: Long = System.currentTimeMillis(),
+    /** "prompt" until the model or the user names the conversation, then "ai" or "manual". */
+    val titleSource: String = "prompt",
 ) {
     fun json() =
         JSONObject()
             .put("id", id)
             .put("title", title)
+            .put("titleSource", titleSource)
             .put("status", status)
             .put("summary", summary)
             .put("steps", JSONArray().apply { steps.forEach { put(it.json()) } })
@@ -208,6 +305,7 @@ data class WorkRecord(
                 o.optString("projectName", fallbackName),
                 o.optString("directory", fallbackDirectory),
                 o.optLong("updatedAt", 0),
+                o.optString("titleSource", "prompt"),
             )
         }
     }

@@ -1,7 +1,11 @@
 package app.agentichydra
 
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.suspendCancellableCoroutine
+import okhttp3.Call
+import okhttp3.Callback
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -10,6 +14,10 @@ import okhttp3.Response
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.IOException
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
+
+internal val JSON_MEDIA_TYPE = "application/json".toMediaType()
 
 /**
  * One streaming `/chat/completions` turn for the task loop.
@@ -30,6 +38,12 @@ internal class WorkStreamTurn(
     private val onCall: (okhttp3.Call) -> Unit = {},
     /** One retry without tools when a model rejects the tool schema outright. */
     private val retryWithoutTools: Boolean = false,
+    /** Pacing and automatic-resume choices from Provider settings. */
+    private val rateLimit: RateLimitPolicy = RateLimitPolicy(),
+    /** Called before an automatic retry so the caller can surface the wait. */
+    private val onRateLimitWait: suspend (waitMillis: Long) -> Unit = {},
+    /** Called once a retried turn finally succeeds, so transient notices can be cleared. */
+    private val onRateLimitCleared: suspend () -> Unit = {},
     private val onThought: suspend (thought: String) -> Unit = {},
     private val onText: suspend (text: String) -> Unit = {},
 ) {
@@ -37,8 +51,45 @@ internal class WorkStreamTurn(
     var droppedTools = false
         private set
 
-    /** Runs the turn and returns a non-streaming-shaped response object. */
+    /** Runs the turn, pacing it and resuming it automatically across provider rate limits. */
     suspend fun run(): JSONObject {
+        var attempts = 0
+        var waited = false
+        while (true) {
+            if (rateLimit.prevent) RequestPacer.acquire(provider, rateLimit.rpm)
+            try {
+                val result = runOnce()
+                if (waited) onRateLimitCleared()
+                return result
+            } catch (e: ProviderRateLimitException) {
+                val wait = (e.retryAfterMillis * (attempts + 1)).coerceAtMost(MAX_RATE_LIMIT_WAIT)
+                RequestPacer.noteRateLimited(provider, wait)
+                attempts++
+                if (!rateLimit.resume || attempts > MAX_RATE_LIMIT_RETRIES) {
+                    throw IOException(rateLimitFailureMessage(e, wait, retriesExhausted = rateLimit.resume))
+                }
+                waited = true
+                onRateLimitWait(wait)
+                // With pacing on, the next acquire already waits for the provider window.
+                if (!rateLimit.prevent) delay(wait)
+            }
+        }
+    }
+
+    private fun rateLimitFailureMessage(
+        error: ProviderRateLimitException,
+        waitMillis: Long,
+        retriesExhausted: Boolean,
+    ): String =
+        if (retriesExhausted) {
+            "The provider is still rate limiting this key. Wait ${waitLabel(waitMillis)} and retry, " +
+                "or lower Requests per minute in Provider settings."
+        } else {
+            "Provider rate limit reached. Wait ${waitLabel(waitMillis)} and retry, or turn on automatic " +
+                "resume in Provider settings."
+        }
+
+    private suspend fun runOnce(): JSONObject {
         val firstCall = client.newCall(request())
         onCall(firstCall)
         var response = firstCall.execute()
@@ -70,7 +121,22 @@ internal class WorkStreamTurn(
         }
 
         response.use { result ->
-            if (!result.isSuccessful) throw IOException(describeFailure(result.code))
+            if (!result.isSuccessful) {
+                if (result.code == 429) {
+                    throw ProviderRateLimitException(
+                        "Provider rate limit reached.",
+                        result.rateLimitWaitMillis(provider),
+                    )
+                }
+                throw IOException(describeFailure(result.code))
+            }
+            if (rateLimit.prevent) {
+                RequestPacer.noteResponseHeaders(
+                    provider,
+                    result.header("x-ratelimit-remaining-requests"),
+                    result.header("x-ratelimit-reset-requests"),
+                )
+            }
 
             val peek = runCatching { result.peekBody(1024).string() }.getOrDefault("")
             if (peek.trimStart().startsWith("{")) {
@@ -79,12 +145,7 @@ internal class WorkStreamTurn(
                 val firstChoice = json.optJSONArray("choices")?.optJSONObject(0)
                 val msg = firstChoice?.optJSONObject("message")
                 val content = msg?.optString("content", "") ?: ""
-                val thought =
-                    msg?.optString("reasoning_content").orEmpty().ifEmpty {
-                        msg?.optString("reasoning").orEmpty().ifEmpty {
-                            msg?.optString("thought").orEmpty()
-                        }
-                    }
+                val thought = msg?.reasoningText().orEmpty()
                 if (thought.isNotEmpty()) onThought(thought)
                 if (content.isNotEmpty()) onText(content)
                 return json
@@ -110,6 +171,13 @@ internal class WorkStreamTurn(
 
                 val event = JSONObject(data)
                 if (event.has("error")) {
+                    val error = event.optJSONObject("error")
+                    val code = error?.optInt("code", 0) ?: 0
+                    val status = error?.optString("status", "").orEmpty()
+                    if (code == 429 || status.equals("RESOURCE_EXHAUSTED", ignoreCase = true)) {
+                        val hint = retryHintFromBody(error?.toString().orEmpty()) ?: defaultRateLimitWait(provider)
+                        throw ProviderRateLimitException("Provider rate limit reached.", hint.coerceIn(2_000L, 300_000L))
+                    }
                     throw IOException("The provider reported a streaming error. Check the model and try again.")
                 }
 
@@ -117,12 +185,7 @@ internal class WorkStreamTurn(
 
                 val delta = event.optJSONArray("choices")?.optJSONObject(0)?.optJSONObject("delta") ?: continue
 
-                val reasoningChunk =
-                    delta.optString("reasoning_content").ifEmpty {
-                        delta.optString("reasoning").ifEmpty {
-                            delta.optString("thought")
-                        }
-                    }
+                val reasoningChunk = delta.reasoningText()
                 if (reasoningChunk.isNotEmpty()) {
                     thought += reasoningChunk
                     onThought(thought)
@@ -192,7 +255,7 @@ internal class WorkStreamTurn(
                 .Builder()
                 .url(url)
                 .header("Accept", "text/event-stream")
-                .post(body.toString().toRequestBody(JSON_TYPE))
+                .post(body.toString().toRequestBody(JSON_MEDIA_TYPE))
         if (credential.isNotBlank()) builder.header("Authorization", "Bearer $credential")
         return builder.build()
     }
@@ -250,8 +313,9 @@ internal class WorkStreamTurn(
         const val INCLUDE_USAGE = "include_usage"
         const val TOOLS = "tools"
         const val TOOL_CHOICE = "tool_choice"
-        val JSON_TYPE = "application/json".toMediaType()
         const val PEEK_LIMIT = 16384L
+        const val MAX_RATE_LIMIT_RETRIES = 3
+        const val MAX_RATE_LIMIT_WAIT = 300_000L
         val RETRYABLE_CODES = setOf(400, 422)
     }
 }
@@ -318,3 +382,141 @@ internal fun extractThought(
     }
     return rawText to ""
 }
+
+/** Caps one tool result so a long listing cannot crowd out the conversation. */
+internal const val MAX_TOOL_OUTPUT = 16000
+
+/**
+ * Streaming request body shared by the chat, task, and background engines: tools offered
+ * optimistically, usage requested wherever the gateway understands it, then the reasoning policy.
+ */
+internal fun chatPayload(
+    model: String,
+    wire: JSONArray,
+    tools: JSONArray,
+    provider: Provider,
+    reasoning: ReasoningProfile,
+    effort: String,
+): JSONObject {
+    val payload =
+        JSONObject()
+            .put("model", model)
+            .put("messages", wire)
+            .put("tools", tools)
+            .put("tool_choice", "auto")
+            .put("stream", true)
+    if (provider != Provider.CUSTOM) {
+        payload.put("stream_options", JSONObject().put("include_usage", true))
+    }
+    ReasoningPolicy.apply(payload, reasoning, effort)
+    return payload
+}
+
+/** A request wire: the system prompt, then as many recent turns as the remaining window allows. */
+internal fun chatWire(
+    systemPrompt: String,
+    history: JSONArray,
+    budgetChars: Int = CONTEXT_HISTORY_CHARS,
+    toolChars: Long = 0,
+): JSONArray {
+    val remaining = historyBudget(budgetChars, systemPrompt.length.toLong(), toolChars)
+    return systemWire(systemPrompt, pruneHistory(history, remaining))
+}
+
+/**
+ * Enqueues [request] and resolves with [handler]'s result, closing the response afterwards.
+ * Cancelling the awaiting coroutine cancels the HTTP call, and any failure inside [handler]
+ * reaches the caller as the exception it threw rather than as a silent default.
+ */
+internal suspend fun <T> OkHttpClient.awaitResponse(
+    request: Request,
+    handler: (Response) -> T,
+): T =
+    suspendCancellableCoroutine { continuation ->
+        val call = newCall(request)
+        continuation.invokeOnCancellation { call.cancel() }
+        call.enqueue(
+            object : Callback {
+                override fun onFailure(
+                    call: Call,
+                    e: IOException,
+                ) {
+                    continuation.resumeWithException(e)
+                }
+
+                override fun onResponse(
+                    call: Call,
+                    response: Response,
+                ) {
+                    try {
+                        response.use { continuation.resume(handler(it)) }
+                    } catch (e: Exception) {
+                        continuation.resumeWithException(e)
+                    }
+                }
+            },
+        )
+    }
+
+/** A JSON POST to a provider endpoint, with the key omitted when the deployment needs none. */
+internal fun chatCompletionRequest(
+    endpoint: String,
+    payload: JSONObject,
+    credential: String,
+): Request =
+    Request
+        .Builder()
+        .url("${endpoint.trimEnd('/')}/chat/completions")
+        .post(payload.toString().toRequestBody(JSON_MEDIA_TYPE))
+        .apply {
+            if (credential.isNotBlank()) header("Authorization", "Bearer ${credential.trim()}")
+        }.build()
+
+/** Reasoning text, tolerating whichever field name a gateway uses. */
+internal fun JSONObject.reasoningText(): String =
+    optString("reasoning_content").ifEmpty { optString("reasoning").ifEmpty { optString("thought") } }
+
+/** The assistant message a completed turn produced. */
+internal fun JSONObject.assistantMessage(): JSONObject = choicesAt(0).getJSONObject("message")
+
+private fun JSONObject.choicesAt(index: Int): JSONObject = getJSONArray("choices").getJSONObject(index)
+
+/** Message text paired with its reasoning, with a null content treated as empty. */
+internal fun JSONObject.responseTextAndThought(): Pair<String, String> {
+    val content = if (isNull("content")) "" else optString("content", "")
+    return content to reasoningText()
+}
+
+/** One entry of a turn's `tool_calls` array, read once so every engine records it alike. */
+internal data class ToolCall(
+    val id: String,
+    val name: String,
+    val arguments: String,
+)
+
+internal fun JSONArray.toolCallAt(index: Int): ToolCall {
+    val call = getJSONObject(index)
+    val function = call.getJSONObject("function")
+    return ToolCall(call.getString("id"), function.getString("name"), function.get("arguments").toString())
+}
+
+/** The tool message that pairs a call with its result. */
+internal fun toolResultMessage(
+    callId: String,
+    output: String,
+): JSONObject =
+    JSONObject()
+        .put("role", "tool")
+        .put("tool_call_id", callId)
+        .put("content", output.take(MAX_TOOL_OUTPUT))
+
+/** First non-blank line of a response, shown while a task is still running. */
+internal fun progressHeadline(text: String): String =
+    text
+        .lineSequence()
+        .firstOrNull { it.isNotBlank() }
+        ?.trim()
+        ?.take(PROGRESS_HEADLINE_LIMIT)
+        .orEmpty()
+
+private const val PROGRESS_HEADLINE_LIMIT = 240

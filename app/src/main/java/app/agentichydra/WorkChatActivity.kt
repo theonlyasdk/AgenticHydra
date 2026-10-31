@@ -8,25 +8,31 @@ import android.os.Build
 import android.os.Bundle
 import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
-import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.*
+import androidx.compose.animation.expandHorizontally
+import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkHorizontally
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.*
-import androidx.compose.foundation.focusable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.*
@@ -35,21 +41,32 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.focus.FocusRequester
-import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
+import app.agentichydra.mcp.McpToolRouter
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
+import java.time.format.FormatStyle
 import kotlinx.coroutines.delay
 import org.json.JSONObject
 
@@ -68,7 +85,56 @@ private fun openWork(
     )
 }
 
-@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
+private enum class WorkSort(
+    val label: String,
+    val detail: String,
+    val icon: ImageVector,
+) {
+    RECENT("Newest", "Newest first", Icons.Outlined.ArrowDownward),
+    OLDEST("Oldest", "Oldest first", Icons.Outlined.ArrowUpward),
+    NAME("Name", "Name (A–Z)", Icons.Outlined.SortByAlpha),
+}
+
+private fun List<WorkRecord>.sortedFor(sort: WorkSort): List<WorkRecord> =
+    when (sort) {
+        WorkSort.RECENT -> sortedByDescending { it.updatedAt }
+        WorkSort.OLDEST -> sortedBy { it.updatedAt }
+        WorkSort.NAME -> sortedBy { it.title.lowercase() }
+    }
+
+private fun workTimeLabel(
+    updatedAt: Long,
+    relative: Boolean = false,
+    now: Long = System.currentTimeMillis(),
+): String {
+    if (updatedAt <= 0L) return ""
+    val zone = ZoneId.systemDefault()
+    val updated = Instant.ofEpochMilli(updatedAt).atZone(zone)
+    val date = updated.toLocalDate()
+    val today = Instant.ofEpochMilli(now).atZone(zone).toLocalDate()
+    if (relative) {
+        val minutes = ((now - updatedAt) / 60_000L).coerceAtLeast(0)
+        val days = minutes / (60 * 24)
+        return when {
+            minutes < 1 -> "Just now"
+            minutes < 60 -> "${minutes}m ago"
+            minutes < 60 * 24 -> "${minutes / 60}h ago"
+            date == today.minusDays(1) || days == 1L -> "Yesterday"
+            days < 7 -> "${days}d ago"
+            date.year == today.year -> DateTimeFormatter.ofPattern("MMM d").format(date)
+            else -> DateTimeFormatter.ofPattern("MMM d, yyyy").format(date)
+        }
+    }
+    return when {
+        date == today -> DateTimeFormatter.ofLocalizedTime(FormatStyle.SHORT).format(updated)
+        date == today.minusDays(1) -> "Yesterday"
+        date.isAfter(today.minusDays(7)) -> DateTimeFormatter.ofPattern("EEE").format(date)
+        date.year == today.year -> DateTimeFormatter.ofPattern("MMM d").format(date)
+        else -> DateTimeFormatter.ofPattern("MMM d, yyyy").format(date)
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class, ExperimentalLayoutApi::class)
 @Composable
 fun WorkScreen(
     chat: HydraModel,
@@ -76,6 +142,7 @@ fun WorkScreen(
 ) {
     val cs = MaterialTheme.colorScheme
     val context = LocalContext.current
+    val externalPrompt = LocalExternalIntentPrompt.current
     var query by rememberSaveable { mutableStateOf("") }
     var options by remember { mutableStateOf<WorkRecord?>(null) }
     var selection by rememberSaveable { mutableStateOf(emptySet<String>()) }
@@ -84,6 +151,28 @@ fun WorkScreen(
     var title by rememberSaveable { mutableStateOf("") }
     var approvals by rememberSaveable { mutableStateOf(false) }
     var scheduled by rememberSaveable { mutableStateOf(false) }
+    var sort by rememberSaveable { mutableStateOf(WorkSort.RECENT) }
+    var searchFocused by remember { mutableStateOf(false) }
+    var keyboardSeen by remember { mutableStateOf(false) }
+    val keyboardVisible = WindowInsets.isImeVisible
+    val focusManager = LocalFocusManager.current
+    val relativeTime = LocalRelativeTimeEnabled.current
+    // Hiding the keyboard is the user's signal to leave search; drop focus with it.
+    LaunchedEffect(searchFocused, keyboardVisible) {
+        if (keyboardVisible) {
+            keyboardSeen = true
+        } else if (keyboardSeen) {
+            keyboardSeen = false
+            if (searchFocused) focusManager.clearFocus()
+        }
+    }
+    BackHandler(selection.isNotEmpty()) { selection = emptySet() }
+    val listState = rememberLazyListState()
+    val searchFade by animateFloatAsState(
+        targetValue = if (listState.firstVisibleItemIndex > 0 || listState.firstVisibleItemScrollOffset > 0) 1f else 0f,
+        animationSpec = spring(dampingRatio = Spring.DampingRatioNoBouncy, stiffness = Spring.StiffnessMediumLow),
+        label = "Search fade",
+    )
     val folder =
         rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
             if (uri != null) {
@@ -91,38 +180,89 @@ fun WorkScreen(
             }
         }
     val filtered =
-        remember(vm.records, query) {
-            vm.records.filter {
-                it.title.contains(query, true) ||
-                    it.projectName.contains(query, true)
-            }
+        remember(vm.records, query, sort) {
+            vm.records
+                .filter {
+                    it.title.contains(query, true) ||
+                        it.projectName.contains(query, true)
+                }.sortedFor(sort)
         }
     val selectionCount = selection.size
     Scaffold(
         containerColor = cs.background,
         topBar = {
-            TopAppBar(
-                title = {
-                    if (selectionCount == 0) {
-                        Text("Work", style = MaterialTheme.typography.titleLarge)
-                    } else {
-                        Text("$selectionCount selected", style = MaterialTheme.typography.titleMedium)
+            Column {
+                TopAppBar(
+                    title = {
+                        if (selectionCount == 0) {
+                            Text("Work", style = MaterialTheme.typography.titleLarge)
+                        } else {
+                            Text("$selectionCount selected", style = MaterialTheme.typography.titleMedium)
+                        }
+                    },
+                    colors = TopAppBarDefaults.topAppBarColors(containerColor = cs.background),
+                    actions = {
+                        if (selectionCount > 0) {
+                            HintIconButton("Selected task options", Icons.Outlined.MoreHoriz, onClick = {
+                                multiOptions =
+                                    true
+                            })
+                            HintIconButton("Clear selection", Icons.Outlined.Clear, onClick = { selection = emptySet() })
+                        } else {
+                            HintIconButton("Scheduled tasks", Icons.Outlined.Schedule, onClick = { scheduled = true })
+                            HintIconButton("Tool approvals", Icons.Outlined.Shield, onClick = { approvals = true })
+                        }
+                    },
+                )
+                Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+                    Row(
+                        Modifier.widthIn(max = 840.dp).fillMaxWidth().padding(
+                            start = 16.dp,
+                            end = 16.dp,
+                            bottom = 8.dp,
+                        ),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        DockedSearchBar(inputField = {
+                            SearchBarDefaults.InputField(
+                                query = query,
+                                onQueryChange = { query = it },
+                                onSearch = {},
+                                expanded = false,
+                                onExpandedChange = {},
+                                modifier = Modifier.onFocusChanged { searchFocused = it.isFocused },
+                                placeholder = { Text("Search tasks") },
+                                leadingIcon = { Icon(Icons.Outlined.Search, null) },
+                                trailingIcon = if (query.isNotEmpty()) {
+                                    {
+                                        IconButton(
+                                            onClick = { query = "" },
+                                            modifier = Modifier.offset(x = 16.dp),
+                                        ) {
+                                            Icon(
+                                                Icons.Outlined.Clear,
+                                                "Clear search",
+                                                modifier = Modifier.size(24.dp),
+                                            )
+                                        }
+                                    }
+                                } else {
+                                    null
+                                },
+                            )
+                        }, expanded = false, onExpandedChange = {}, modifier = Modifier.weight(1f)) {}
+                        AnimatedVisibility(
+                            visible = !searchFocused,
+                            enter = fadeIn() + expandHorizontally(expandFrom = Alignment.End),
+                            exit = fadeOut() + shrinkHorizontally(shrinkTowards = Alignment.End),
+                        ) {
+                            Box(Modifier.padding(start = 8.dp)) {
+                                WorkSortControl(sort) { sort = it }
+                            }
+                        }
                     }
-                },
-                colors = TopAppBarDefaults.topAppBarColors(containerColor = cs.background),
-                actions = {
-                    if (selectionCount > 0) {
-                        HintIconButton("Selected task options", Icons.Outlined.MoreHoriz, onClick = {
-                            multiOptions =
-                                true
-                        })
-                        HintIconButton("Clear selection", Icons.Outlined.Clear, onClick = { selection = emptySet() })
-                    } else {
-                        HintIconButton("Scheduled tasks", Icons.Outlined.Schedule, onClick = { scheduled = true })
-                        HintIconButton("Tool approvals", Icons.Outlined.Shield, onClick = { approvals = true })
-                    }
-                },
-            )
+                }
+            }
         },
         floatingActionButton = {
             ExtendedFloatingActionButton(
@@ -137,150 +277,201 @@ fun WorkScreen(
         Box(Modifier.fillMaxSize().padding(padding), contentAlignment = Alignment.TopCenter) {
             LazyColumn(
                 Modifier.widthIn(max = 840.dp).fillMaxSize(),
-                contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 112.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
+                state = listState,
+                contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 4.dp, bottom = 112.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
             ) {
-                item {
-                    DockedSearchBar(inputField = {
-                        SearchBarDefaults.InputField(
-                            query = query,
-                            onQueryChange = { query = it },
-                            onSearch = {},
-                            expanded = false,
-                            onExpandedChange = {},
-                            placeholder = { Text("Search tasks") },
-                            leadingIcon = { Icon(Icons.Outlined.Search, null) },
-                        )
-                    }, expanded = false, onExpandedChange = {}, modifier = Modifier.fillMaxWidth()) {}
-                }
-                vm.error?.let { error -> item { WorkError(error) { vm.error = null } } }
+                vm.error?.let { error -> item { ErrorBanner(error, onDismiss = { vm.error = null }) } }
                 if (filtered.isEmpty()) {
                     item {
-                        Box(Modifier.fillParentMaxHeight().fillMaxWidth(), contentAlignment = Alignment.Center) {
-                            Column(
-                                horizontalAlignment = Alignment.CenterHorizontally,
-                                verticalArrangement = Arrangement.spacedBy(16.dp),
-                            ) {
-                                HydraIllustration(Modifier.size(100.dp))
-                                Text(
-                                    if (query.isBlank()) "No tasks yet" else "No matching tasks",
-                                    style = MaterialTheme.typography.titleLarge,
-                                )
+                        Box(
+                            Modifier.fillParentMaxHeight().fillMaxWidth().imePadding(),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            if (query.isBlank()) {
+                                Column(
+                                    horizontalAlignment = Alignment.CenterHorizontally,
+                                    verticalArrangement = Arrangement.spacedBy(16.dp),
+                                ) {
+                                    HydraIllustration(Modifier.size(100.dp))
+                                    Text("No tasks yet", style = MaterialTheme.typography.titleLarge)
+                                }
+                            } else {
+                                Column(
+                                    modifier = Modifier.padding(horizontal = 32.dp).widthIn(max = 320.dp),
+                                    horizontalAlignment = Alignment.CenterHorizontally,
+                                ) {
+                                    Surface(
+                                        shape = CircleShape,
+                                        color = cs.surfaceContainerHigh,
+                                        modifier = Modifier.size(64.dp),
+                                    ) {
+                                        Box(contentAlignment = Alignment.Center) {
+                                            Icon(
+                                                Icons.Outlined.SearchOff,
+                                                null,
+                                                modifier = Modifier.size(28.dp),
+                                                tint = cs.onSurfaceVariant,
+                                            )
+                                        }
+                                    }
+                                    Spacer(Modifier.height(16.dp))
+                                    Text(
+                                        "No tasks match",
+                                        style = MaterialTheme.typography.titleLarge,
+                                        textAlign = TextAlign.Center,
+                                    )
+                                    Spacer(Modifier.height(6.dp))
+                                    Text(
+                                        "“$query”",
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        color = cs.onSurfaceVariant,
+                                        textAlign = TextAlign.Center,
+                                    )
+                                    Spacer(Modifier.height(20.dp))
+                                    FilledTonalButton(onClick = { query = "" }) {
+                                        Icon(Icons.Outlined.Clear, null, Modifier.size(16.dp))
+                                        Spacer(Modifier.width(8.dp))
+                                        Text("Clear search")
+                                    }
+                                }
                             }
                         }
                     }
                 }
-                items(filtered, key = { it.id }) { record ->
+                itemsIndexed(filtered, key = { _, record -> record.id }) { index, record ->
                     val active = vm.running && vm.activeId == record.id
                     val background = record.status == "Running"
                     val selected = record.id in selection
+                    val rowColor = if (selected) cs.primaryContainer else cs.surfaceContainerHigh
+                    val toggleSelection = {
+                        selection = if (selected) selection - record.id else selection + record.id
+                    }
                     Surface(
-                        color = if (selected) cs.primaryContainer else cs.surfaceContainerLow,
-                        shape = MaterialTheme.shapes.large,
+                        color = rowColor,
+                        shape = groupedRowShape(index, filtered.size),
                         modifier =
-                            Modifier.fillMaxWidth().combinedClickable(
+                            Modifier.fillMaxWidth().semantics { this.selected = selected }.combinedClickable(
                                 onClick = {
                                     if (selection.isNotEmpty()) {
-                                        if (selected) {
-                                            selection -= record.id
-                                        } else {
-                                            selection += record.id
-                                        }
+                                        toggleSelection()
                                     } else {
                                         openWork(context, record.id)
                                     }
                                 },
                                 onLongClick = {
-                                    if (selection.isNotEmpty()) {
-                                        if (selected) {
-                                            selection -= record.id
-                                        } else {
-                                            selection += record.id
-                                        }
-                                    } else {
-                                        options =
-                                            record
-                                    }
+                                    selection = if (selected) selection - record.id else selection + record.id
                                 },
-                                onLongClickLabel = "Task options",
+                                onLongClickLabel = if (selected) "Deselect task" else "Select task",
                             ),
                     ) {
-                        ListItem(
-                            headlineContent = { MarqueeTitle(record.title, surface = cs.surfaceContainerLow) },
-                            supportingContent = {
-                                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Box {
+                            ListItem(
+                                modifier = Modifier.padding(end = 40.dp),
+                                headlineContent = {
                                     MarqueeTitle(
-                                        projectSubtitle(record.projectName, record.projectUri != null, active),
-                                        surface = cs.surfaceContainerLow,
-                                        style = MaterialTheme.typography.bodySmall,
+                                        record.title,
+                                        surface = rowColor,
+                                        style = MaterialTheme.typography.workListTitle,
                                     )
+                                },
+                                supportingContent = {
+                                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                                            MarqueeTitle(
+                                                projectSubtitle(record.projectName, record.projectUri != null, active),
+                                                Modifier.weight(1f),
+                                                surface = rowColor,
+                                                style = MaterialTheme.typography.bodySmall,
+                                            )
+                                            val time = workTimeLabel(record.updatedAt, relativeTime)
+                                            if (time.isNotBlank()) {
+                                                Spacer(Modifier.width(12.dp))
+                                                Text(
+                                                    time,
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                    color = cs.onSurfaceVariant,
+                                                )
+                                            }
+                                        }
+                                        when {
+                                            active -> {
+                                                WorkProgressLabel(
+                                                    vm.progress.ifBlank { "Thinking…" },
+                                                    rowColor,
+                                                )
+                                            }
+
+                                            background -> {
+                                                WorkProgressLabel(
+                                                    if (vm.engine.isRunning(record.id)) {
+                                                        vm.engine.progressFor(record.id).ifBlank {
+                                                            "Working…"
+                                                        }
+                                                    } else {
+                                                        "Working…"
+                                                    },
+                                                    rowColor,
+                                                )
+                                            }
+
+                                            else -> {
+                                                Text(
+                                                    record.status,
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                    color = cs.workStatusColor(record.status),
+                                                )
+                                            }
+                                        }
+                                    }
+                                },
+                                leadingContent = {
                                     when {
-                                        active -> {
-                                            WorkProgressLabel(
-                                                vm.progress.ifBlank { "Thinking…" },
-                                                cs.surfaceContainerLow,
+                                        selection.isNotEmpty() -> {
+                                            Icon(
+                                                if (selected) {
+                                                    Icons.Outlined.CheckCircle
+                                                } else {
+                                                    Icons.Outlined.RadioButtonUnchecked
+                                                },
+                                                if (selected) "Selected" else "Not selected",
+                                                Modifier.size(24.dp),
+                                                tint = if (selected) cs.primary else cs.onSurfaceVariant,
                                             )
                                         }
 
-                                        background -> {
-                                            WorkProgressLabel(
-                                                if (vm.engine.isRunning(record.id)) {
-                                                    vm.engine.progressFor(record.id).ifBlank {
-                                                        "Working…"
-                                                    }
-                                                } else {
-                                                    "Working…"
-                                                },
-                                                cs.surfaceContainerLow,
+                                        active || background -> {
+                                            CircularProgressIndicator(
+                                                Modifier.size(24.dp),
+                                                strokeWidth = 2.dp,
                                             )
                                         }
 
                                         else -> {
-                                            Text(
-                                                record.status,
-                                                style = MaterialTheme.typography.labelSmall,
-                                                color =
-                                                    if (record.status == "Failed") {
-                                                        cs.error
-                                                    } else {
-                                                        cs.onSurfaceVariant
-                                                    },
-                                            )
+                                            Icon(Icons.Outlined.Terminal, null, tint = cs.primary)
                                         }
                                     }
-                                }
-                            },
-                            leadingContent = {
-                                when {
-                                    selected -> {
-                                        Icon(Icons.Outlined.Check, "", Modifier.size(24.dp))
-                                    }
-
-                                    active || background -> {
-                                        CircularProgressIndicator(
-                                            Modifier.size(24.dp),
-                                            strokeWidth = 2.dp,
-                                        )
-                                    }
-
-                                    else -> {
-                                        Icon(Icons.Outlined.Terminal, null, tint = cs.primary)
-                                    }
-                                }
-                            },
-                            trailingContent = {
-                                IconButton(onClick = {
+                                },
+                                colors = ListItemDefaults.colors(containerColor = rowColor),
+                            )
+                            IconButton(
+                                onClick = {
                                     if (selection.isNotEmpty()) multiOptions = true else options = record
-                                }) { Icon(Icons.Outlined.MoreVert, "Task options") }
-                            },
-                            colors =
-                                ListItemDefaults.colors(
-                                    containerColor = if (selected) cs.primaryContainer else cs.surfaceContainerLow,
-                                ),
-                        )
+                                },
+                                modifier = Modifier.align(Alignment.CenterEnd).padding(end = 4.dp),
+                            ) { Icon(Icons.Outlined.MoreHoriz, "Task options") }
+                        }
                     }
                 }
             }
+            Box(
+                Modifier
+                    .widthIn(max = 840.dp)
+                    .fillMaxWidth()
+                    .height(20.dp)
+                    .graphicsLayer { alpha = searchFade }
+                    .background(Brush.verticalGradient(listOf(cs.background, Color.Transparent))),
+            )
         }
     }
     options?.let { record ->
@@ -303,39 +494,43 @@ fun WorkScreen(
                     )
                 }
                 Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    TaskOptionRow(0, 5, Icons.Outlined.ChatBubbleOutline, "Open conversation") {
+                    TaskOptionRow(0, 6, Icons.Outlined.ChatBubbleOutline, "Open conversation") {
                         dismiss()
                         openWork(context, record.id)
                     }
-                    TaskOptionRow(1, 5, Icons.Outlined.Edit, "Rename") {
+                    TaskOptionRow(1, 6, Icons.Outlined.CheckCircle, "Select task") {
+                        dismiss()
+                        selection = selection + record.id
+                    }
+                    TaskOptionRow(2, 6, Icons.Outlined.Edit, "Rename") {
                         dismiss()
                         title = record.title
                         rename = record
                     }
-                    TaskOptionRow(2, 5, Icons.Outlined.FolderOpen, "Change directory", enabled = !vm.running) {
+                    TaskOptionRow(3, 6, Icons.Outlined.FolderOpen, "Change directory", enabled = !vm.running) {
                         dismiss()
                         if (vm.viewRecord(record)) folder.launch(null)
                     }
-                    TaskOptionRow(3, 5, Icons.Outlined.Share, "Export conversation") {
+                    TaskOptionRow(4, 6, Icons.Outlined.Share, "Export conversation") {
                         dismiss()
-                        context.startActivity(
-                            Intent.createChooser(
-                                Intent(
-                                    Intent.ACTION_SEND,
-                                ).setType("text/markdown").putExtra(Intent.EXTRA_TEXT, exportWorkRecord(record)),
-                                "Export task",
-                            ),
+                        shareText(
+                            context,
+                            externalPrompt,
+                            "Export task",
+                            exportWorkRecord(record),
+                            mime = "text/markdown",
                         )
                     }
                     TaskOptionRow(
-                        4,
                         5,
+                        6,
                         Icons.Outlined.DeleteOutline,
                         "Delete",
                         enabled =
                             !(vm.running && vm.activeId == record.id) && !vm.engine.isRunning(record.id),
-                        danger = !confirm,
+                        danger = true,
                         confirmDelete = confirm,
+                        confirmLabel = "Tap again to confirm",
                     ) {
                         if (!confirm) {
                             confirm = true
@@ -363,37 +558,46 @@ fun WorkScreen(
     if (approvals) ApprovalSheet(vm) { approvals = false }
     if (scheduled) TaskSchedulesSheet((context.applicationContext as HydraApplication).schedules) { scheduled = false }
     rename?.let { record ->
-        val renameFocus = remember { FocusRequester() }
-        val keyboard = LocalSoftwareKeyboardController.current
-        LaunchedEffect(Unit) {
-            renameFocus.requestFocus()
-            keyboard?.show()
-        }
-        AlertDialog(
-            onDismissRequest = {
+        RenameDialog(
+            title = "Rename task",
+            label = "Task name",
+            value = title,
+            onValueChange = { title = it },
+            confirmLabel = "Rename",
+            onConfirm = {
+                vm.renameConversation(record.id, title)
                 rename = null
             },
-            title = {
-                Text("Rename task")
-            },
-            text = {
-                OutlinedTextField(title, {
-                    title = it
-                }, label = { Text("Task name") }, singleLine = true, modifier = Modifier.focusRequester(renameFocus))
-            },
-            confirmButton = {
-                TextButton(onClick = {
-                    vm.renameConversation(record.id, title)
-                    rename = null
-                }, enabled = title.isNotBlank()) { Text("Rename") }
-            },
-            dismissButton = {
-                TextButton(onClick = {
-                    rename =
-                        null
-                }) { Text("Cancel") }
-            },
+            onDismiss = { rename = null },
+            autofocus = true,
         )
+    }
+}
+
+@Composable
+private fun WorkSortControl(
+    sort: WorkSort,
+    onSelect: (WorkSort) -> Unit,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    Box {
+        FilledTonalButton(
+            onClick = { expanded = true },
+            modifier = Modifier.height(56.dp),
+            contentPadding = PaddingValues(horizontal = 16.dp),
+        ) {
+            Icon(Icons.Outlined.SwapVert, null, Modifier.size(18.dp))
+            Spacer(Modifier.width(6.dp))
+            Text(sort.label, style = MaterialTheme.typography.labelLarge)
+        }
+        HydraOverflowMenu(expanded, { expanded = false }, headerText = "Sort tasks") {
+            WorkSort.entries.forEach { option ->
+                HydraMenuItem(option.detail, option.icon, selected = option == sort) {
+                    expanded = false
+                    onSelect(option)
+                }
+            }
+        }
     }
 }
 
@@ -413,6 +617,7 @@ private fun TaskOptionRow(
     enabled: Boolean = true,
     danger: Boolean = false,
     confirmDelete: Boolean = false,
+    confirmLabel: String = label,
     onClick: () -> Unit,
 ) {
     val cs = MaterialTheme.colorScheme
@@ -434,21 +639,29 @@ private fun TaskOptionRow(
                     (slideOutVertically(spring(dampingRatio = .9f, stiffness = 350f)) { -it } + fadeOut(spring()))
             ).using(null)
         }, label = "TaskOptionLabel") { confirmed ->
+            val text = if (confirmed) confirmLabel else label
             Row(
                 Modifier.fillMaxWidth().heightIn(min = 56.dp).padding(horizontal = 16.dp, vertical = 14.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Icon(
                     if (confirmed) Icons.Outlined.CheckCircleOutline else icon,
-                    label,
+                    text,
                     Modifier.size(if (confirmed) 24.dp else 26.dp),
-                    tint = if (confirmed) cs.onSecondaryContainer else cs.onSurfaceVariant,
+                    tint = if (confirmed) cs.onErrorContainer else cs.onSurfaceVariant,
                 )
                 Spacer(Modifier.width(12.dp))
                 Text(
-                    label,
+                    text,
                     style = MaterialTheme.typography.titleMedium,
-                    color = if (danger) cs.error else cs.onSurface,
+                    color =
+                        if (confirmed) {
+                            cs.onErrorContainer
+                        } else if (danger) {
+                            cs.error
+                        } else {
+                            cs.onSurface
+                        },
                 )
             }
         }
@@ -476,20 +689,21 @@ private fun taskMultiOptionsSheet(
             Row(Modifier.fillMaxWidth().padding(bottom = 16.dp), verticalAlignment = Alignment.CenterVertically) {
                 Icon(Icons.Outlined.Checklist, null, tint = cs.primary)
                 Spacer(Modifier.width(12.dp))
-                Text("${selection.size} selected", style = MaterialTheme.typography.titleMedium)
+                Text(
+                    "${selection.size} of ${vm.records.size} selected",
+                    style = MaterialTheme.typography.titleMedium,
+                )
             }
             Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                TaskOptionRow(0, 3, Icons.Outlined.SelectAll, "Select all") {
-                    selectAll()
-                    dismiss()
-                }
+                TaskOptionRow(0, 3, Icons.Outlined.SelectAll, "Select all") { selectAll() }
                 TaskOptionRow(
                     1,
                     3,
                     Icons.Outlined.DeleteOutline,
                     "Delete selected",
-                    danger = !confirm,
+                    danger = true,
                     confirmDelete = confirm,
+                    confirmLabel = "Tap again to confirm",
                 ) {
                     if (!confirm) {
                         confirm = true
@@ -500,10 +714,7 @@ private fun taskMultiOptionsSheet(
                         dismiss()
                     }
                 }
-                TaskOptionRow(2, 3, Icons.Outlined.Clear, "Clear selection") {
-                    dismiss()
-                    clearSelection()
-                }
+                TaskOptionRow(2, 3, Icons.Outlined.Clear, "Clear selection") { dismiss() }
             }
         }
     }
@@ -540,6 +751,7 @@ class WorkChatActivity : ComponentActivity() {
     private var conversationId = ""
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        setTheme(if (isAppDarkTheme(this)) R.style.AppThemeDark else R.style.AppThemeLight)
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         val application = application as HydraApplication
@@ -552,7 +764,24 @@ class WorkChatActivity : ComponentActivity() {
             work.newThread()
         }
         conversationId = requested ?: work.activeId
-        setContent { HydraTheme { WorkChatRoute(chat, work, conversationId) { finish() } } }
+        setContent {
+            HydraTheme {
+                val context = LocalContext.current
+                val linkSheet = rememberLinkSheet()
+                val externalPrompt = rememberExternalIntentPrompt()
+                val openLink: (String) -> Unit = remember(context, linkSheet) {
+                    { url -> openInLinkSheet(context, url, linkSheet, externalPrompt) }
+                }
+                CompositionLocalProvider(
+                    LocalLinkOpener provides openLink,
+                    LocalExternalIntentPrompt provides externalPrompt,
+                ) {
+                    WorkChatRoute(chat, work, conversationId) { finish() }
+                    LinkSheet(linkSheet)
+                    ExternalIntentHost(externalPrompt)
+                }
+            }
+        }
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
@@ -578,6 +807,7 @@ data class WorkChatUiState(
     val hasProject: Boolean = true,
     val streamingResponseId: String? = null,
     val activeTasks: Int = 0,
+    val context: ContextUsage = ContextUsage(),
 )
 
 class WorkChatActions(
@@ -594,11 +824,13 @@ class WorkChatActions(
     val onDismissError: () -> Unit = {},
     val onCopy: (Message) -> Unit = {},
     val onShare: (Message) -> Unit = {},
+    val onExport: () -> Unit = {},
     val onAttachFile: () -> Unit = {},
     val onAttachMedia: () -> Unit = {},
     val onRemoveAttachment: (String) -> Unit = {},
     val onRename: () -> Unit = {},
     val onActiveTasks: () -> Unit = {},
+    val onContext: () -> Unit = {},
 )
 
 @Composable
@@ -610,6 +842,7 @@ private fun WorkChatRoute(
 ) {
     val context = LocalContext.current
     val clipboard = LocalClipboardManager.current
+    val externalPrompt = LocalExternalIntentPrompt.current
     var draft by rememberSaveable(id) { mutableStateOf("") }
     var models by rememberSaveable { mutableStateOf(false) }
     var connections by rememberSaveable { mutableStateOf(false) }
@@ -619,8 +852,14 @@ private fun WorkChatRoute(
     var rename by rememberSaveable { mutableStateOf(false) }
     var renameTitle by rememberSaveable { mutableStateOf("") }
     var tasks by remember { mutableStateOf(false) }
+    var contextSheet by rememberSaveable { mutableStateOf(false) }
     val active = vm.activeId == id
     val saved = vm.records.firstOrNull { it.id == id }
+    val savedContext =
+        remember(saved?.apiHistory, ContextBudget.tokens) {
+            saved?.let { vm.usageFor(it.apiHistory) } ?: ContextUsage()
+        }
+    LaunchedEffect(ContextBudget.tokens) { if (active) vm.refreshContextUsage() }
     val engineRun = vm.engine.isRunning(id)
     val state =
         if (active) {
@@ -644,6 +883,7 @@ private fun WorkChatRoute(
                     vm.projectUri != null,
                 streamingResponseId = vm.streamingId,
                 activeTasks = vm.engine.active.size,
+                context = vm.contextUsage,
             )
         } else {
             WorkChatUiState(
@@ -658,6 +898,7 @@ private fun WorkChatRoute(
                 hasProject = saved?.projectUri != null,
                 progress = vm.engine.progressFor(id),
                 activeTasks = vm.engine.active.size,
+                context = savedContext,
             )
         }
 
@@ -748,14 +989,21 @@ private fun WorkChatRoute(
                 rename = true
             },
             onActiveTasks = { tasks = true },
+            onContext = { contextSheet = true },
             onCopy = { clipboard.setText(AnnotatedString(it.text)) },
             onShare = { message ->
-                runCatching {
-                    context.startActivity(
-                        Intent.createChooser(
-                            Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_TEXT, message.text),
-                            "Share response",
-                        ),
+                shareText(context, externalPrompt, "Share response", message.text)
+            },
+            onExport = {
+                if (state.messages.isNotEmpty()) {
+                    val record =
+                        WorkRecord(state.title, state.status, "", state.steps, emptyList(), id, state.messages)
+                    shareText(
+                        context,
+                        externalPrompt,
+                        "Export conversation",
+                        exportWorkRecord(record),
+                        mime = "text/markdown",
                     )
                 }
             },
@@ -764,6 +1012,11 @@ private fun WorkChatRoute(
         ComposerModelControl(chat, enabled = !vm.running) {
             models =
                 true
+        }
+    }
+    if (contextSheet) {
+        ContextSheet(state.context, { if (active) vm.setContextTokens(it) else ContextBudget.choose(context, it) }) {
+            contextSheet = false
         }
     }
     if (models) {
@@ -802,6 +1055,16 @@ private fun WorkChatRoute(
                 { vm.answerQuestions(request.id, null) },
             )
         }
+        vm.pendingQuiz?.let { quiz ->
+            AgentQuizSheet(
+                quiz,
+                onFinish = { attempt ->
+                    vm.finishQuiz(quiz.id, attempt)
+                    QuizResultActivity.open(context, attempt)
+                },
+                onCancel = { vm.cancelQuiz(quiz.id) },
+            )
+        }
         DeviceActionHost(vm)
         if (vm.termuxPromptId != null) {
             AlertDialog(
@@ -824,25 +1087,17 @@ private fun WorkChatRoute(
         }
     }
     if (rename) {
-        AlertDialog(
-            onDismissRequest = { rename = false },
-            title = { Text("Rename task") },
-            text = {
-                OutlinedTextField(
-                    renameTitle,
-                    { renameTitle = it },
-                    label = { Text("Task name") },
-                    singleLine = true,
-                    shape = MaterialTheme.shapes.medium,
-                )
+        RenameDialog(
+            title = "Rename task",
+            label = "Task name",
+            value = renameTitle,
+            onValueChange = { renameTitle = it },
+            confirmLabel = "Rename",
+            onConfirm = {
+                vm.renameConversation(id, renameTitle)
+                rename = false
             },
-            confirmButton = {
-                TextButton(onClick = {
-                    vm.renameConversation(id, renameTitle)
-                    rename = false
-                }, enabled = renameTitle.isNotBlank()) { Text("Rename") }
-            },
-            dismissButton = { TextButton(onClick = { rename = false }) { Text("Cancel") } },
+            onDismiss = { rename = false },
         )
     }
 }
@@ -857,8 +1112,11 @@ fun WorkChatScreen(
     modelControl: @Composable () -> Unit,
 ) {
     val cs = MaterialTheme.colorScheme
+    val context = LocalContext.current
+    val timeline = remember(state.messages, state.steps) { groupReadFileReads(state.messages, state.steps) }
     var menu by remember { mutableStateOf(false) }
     var attachmentMenu by remember { mutableStateOf(false) }
+    var searchOpen by rememberSaveable(state.conversationId) { mutableStateOf(false) }
     val canResumeCancelled =
         !state.running && state.status == "Cancelled" && draft.isBlank() && state.attachments.isEmpty()
     val canSendMessage =
@@ -896,61 +1154,47 @@ fun WorkChatScreen(
                 HintIconButton("Back to task history", Icons.AutoMirrored.Outlined.ArrowBack, onClick = actions.onBack)
             },
             actions = {
+                ContextRingButton(state.context, onClick = actions.onContext)
+                HintIconButton(
+                    if (searchOpen) "Close search" else "Search in conversation",
+                    Icons.Outlined.Search,
+                    onClick = { searchOpen = !searchOpen },
+                )
                 Box {
-                    HintIconButton("Task options", Icons.Outlined.MoreVert, onClick = { menu = true })
+                    HintIconButton("Task options", Icons.Outlined.MoreHoriz, onClick = { menu = true })
                     HydraOverflowMenu(menu, { menu = false }, headerText = state.title) {
-                        DropdownMenuItem(
-                            text = {
-                                Text(
-                                    if (state.activeTasks == 1) {
-                                        "1 active task"
-                                    } else {
-                                        "${state.activeTasks} active tasks"
-                                    },
-                                )
-                            },
-                            leadingIcon = { Icon(Icons.Outlined.AddTask, null) },
+                        HydraMenuItem(
+                            if (state.activeTasks == 1) "1 active task" else "${state.activeTasks} active tasks",
+                            Icons.Outlined.AddTask,
                             enabled = state.activeTasks > 0,
-                            onClick = {
-                                menu = false
-                                actions.onActiveTasks()
-                            },
-                        )
-                        DropdownMenuItem(
-                            text = { Text("Project files") },
-                            leadingIcon = { Icon(Icons.Outlined.FolderOpen, null) },
-                            enabled = state.canSend,
-                            onClick = {
-                                menu = false
-                                actions.onFiles()
-                            },
-                        )
-                        DropdownMenuItem(
-                            text = { Text("Changes") },
-                            leadingIcon = { Icon(Icons.Outlined.Difference, null) },
-                            enabled = state.canSend,
-                            onClick = {
-                                menu = false
-                                actions.onChanges()
-                            },
-                        )
-                        DropdownMenuItem(
-                            text = { Text("Tool approvals") },
-                            leadingIcon = { Icon(Icons.Outlined.Shield, null) },
-                            onClick = {
-                                menu = false
-                                actions.onApprovals()
-                            },
-                        )
-                        DropdownMenuItem(
-                            text = { Text("Connections") },
-                            leadingIcon = { Icon(Icons.Outlined.Hub, null) },
-                            enabled = !state.running,
-                            onClick = {
-                                menu = false
-                                actions.onConnections()
-                            },
-                        )
+                        ) {
+                            menu = false
+                            actions.onActiveTasks()
+                        }
+                        HydraMenuItem("Project files", Icons.Outlined.FolderOpen, enabled = state.canSend) {
+                            menu = false
+                            actions.onFiles()
+                        }
+                        HydraMenuItem("Changes", Icons.Outlined.Difference, enabled = state.canSend) {
+                            menu = false
+                            actions.onChanges()
+                        }
+                        HydraMenuItem(
+                            "Export conversation",
+                            Icons.Outlined.Share,
+                            enabled = state.messages.isNotEmpty(),
+                        ) {
+                            menu = false
+                            actions.onExport()
+                        }
+                        HydraMenuItem("Tool approvals", Icons.Outlined.Shield) {
+                            menu = false
+                            actions.onApprovals()
+                        }
+                        HydraMenuItem("Connections", Icons.Outlined.Hub, enabled = !state.running) {
+                            menu = false
+                            actions.onConnections()
+                        }
                     }
                 }
             },
@@ -966,125 +1210,128 @@ fun WorkChatScreen(
                 .fillMaxWidth(),
         ) {
             state.error?.let {
-                WorkError(it, actions.onDismissError)
+                ErrorBanner(it, onDismiss = actions.onDismissError)
                 Spacer(Modifier.height(8.dp))
             }
-            Surface(color = cs.surfaceContainer, shape = MaterialTheme.shapes.extraLarge) {
-                Column(Modifier.padding(8.dp)) {
-                    if (state.attaching) LinearProgressIndicator(Modifier.fillMaxWidth())
-                    if (state.attachments.isNotEmpty()) {
-                        FlowRow(
-                            Modifier.fillMaxWidth().padding(horizontal = 8.dp),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        ) {
-                            state.attachments.forEach { attachment ->
-                                InputChip(
-                                    selected = false,
-                                    onClick = { actions.onRemoveAttachment(attachment.id) },
-                                    label = {
-                                        MarqueeTitle(
-                                            attachment.name,
-                                            Modifier.widthIn(max = 180.dp),
-                                            surface = cs.surfaceContainer,
-                                            style = MaterialTheme.typography.labelLarge,
+            AnimatedVisibility(
+                visible = !searchOpen,
+                enter = expandVertically(spring(stiffness = 520f)) + fadeIn(spring(stiffness = 520f)),
+                exit = shrinkVertically(spring(stiffness = 520f)) + fadeOut(spring(stiffness = 520f)),
+            ) {
+                Column {
+                    Surface(color = cs.surfaceContainer, shape = MaterialTheme.shapes.extraLarge) {
+                        Column(Modifier.padding(8.dp)) {
+                            if (state.attaching) LinearProgressIndicator(Modifier.fillMaxWidth())
+                            if (state.attachments.isNotEmpty()) {
+                                FlowRow(
+                                    Modifier.fillMaxWidth().padding(horizontal = 8.dp),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                ) {
+                                    state.attachments.forEach { attachment ->
+                                        InputChip(
+                                            selected = false,
+                                            onClick = { actions.onRemoveAttachment(attachment.id) },
+                                            label = {
+                                                MarqueeTitle(
+                                                    attachment.name,
+                                                    Modifier.widthIn(max = 180.dp),
+                                                    surface = cs.surfaceContainer,
+                                                    style = MaterialTheme.typography.labelLarge,
+                                                )
+                                            },
+                                            leadingIcon = {
+                                                Icon(
+                                                    if (attachment.isImage) {
+                                                        Icons.Outlined.Image
+                                                    } else {
+                                                        Icons.Outlined.AttachFile
+                                                    },
+                                                    null,
+                                                )
+                                            },
+                                            trailingIcon = { Icon(Icons.Outlined.Close, null) },
+                                            modifier =
+                                                Modifier.semantics {
+                                                    contentDescription = "Remove ${attachment.name}"
+                                                },
                                         )
-                                    },
-                                    leadingIcon = {
+                                    }
+                                }
+                            }
+                            TextField(
+                                draft,
+                                onDraft,
+                                placeholder = { Text("Reply to Hydra") },
+                                modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp, max = 176.dp),
+                                textStyle = MaterialTheme.typography.bodyLarge,
+                                colors =
+                                    TextFieldDefaults.colors(
+                                        focusedContainerColor = cs.surfaceContainer,
+                                        unfocusedContainerColor = cs.surfaceContainer,
+                                        focusedIndicatorColor = androidx.compose.ui.graphics.Color.Transparent,
+                                        unfocusedIndicatorColor = androidx.compose.ui.graphics.Color.Transparent,
+                                    ),
+                            )
+                            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                                Box {
+                                    IconButton(onClick = {
+                                        attachmentMenu = true
+                                    }, enabled = !state.running && state.canSend) {
                                         Icon(
-                                            if (attachment.isImage) Icons.Outlined.Image else Icons.Outlined.AttachFile,
-                                            null,
+                                            Icons.Outlined.Add,
+                                            "Add attachment or change directory",
                                         )
-                                    },
-                                    trailingIcon = { Icon(Icons.Outlined.Close, null) },
-                                    modifier = Modifier.semantics { contentDescription = "Remove ${attachment.name}" },
-                                )
+                                    }
+                                    HydraOverflowMenu(attachmentMenu, { attachmentMenu = false }) {
+                                        HydraMenuItem("Attach file", Icons.Outlined.AttachFile) {
+                                            attachmentMenu = false
+                                            actions.onAttachFile()
+                                        }
+                                        HydraMenuItem("Attach media", Icons.Outlined.Image) {
+                                            attachmentMenu = false
+                                            actions.onAttachMedia()
+                                        }
+                                        HydraMenuItem("Change directory", Icons.Outlined.CreateNewFolder) {
+                                            attachmentMenu = false
+                                            actions.onProject()
+                                        }
+                                    }
+                                }
+                                Box(Modifier.weight(1f)) { modelControl() }
+                                FilledIconButton(
+                                    onClick =
+                                        when {
+                                            state.running -> actions.onStop
+                                            canResumeCancelled -> actions.onResume
+                                            else -> actions.onSend
+                                        },
+                                    enabled = canSendMessage,
+                                    modifier = Modifier.size(48.dp),
+                                ) {
+                                    Icon(
+                                        when {
+                                            state.running -> Icons.Outlined.Stop
+                                            canResumeCancelled -> Icons.Outlined.PlayArrow
+                                            else -> Icons.Outlined.ArrowUpward
+                                        },
+                                        when {
+                                            state.running -> "Stop task"
+                                            canResumeCancelled -> "Resume task"
+                                            else -> "Send task message"
+                                        },
+                                    )
+                                }
                             }
                         }
                     }
-                    TextField(
-                        draft,
-                        onDraft,
-                        placeholder = { Text("Reply to Hydra") },
-                        modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp, max = 176.dp),
-                        textStyle = MaterialTheme.typography.bodyLarge,
-                        colors =
-                            TextFieldDefaults.colors(
-                                focusedContainerColor = cs.surfaceContainer,
-                                unfocusedContainerColor = cs.surfaceContainer,
-                                focusedIndicatorColor = androidx.compose.ui.graphics.Color.Transparent,
-                                unfocusedIndicatorColor = androidx.compose.ui.graphics.Color.Transparent,
-                            ),
-                    )
-                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                        Box {
-                            IconButton(onClick = {
-                                attachmentMenu = true
-                            }, enabled = !state.running && state.canSend) {
-                                Icon(
-                                    Icons.Outlined.Add,
-                                    "Add attachment or change directory",
-                                )
-                            }
-                            DropdownMenu(attachmentMenu, { attachmentMenu = false }) {
-                                DropdownMenuItem(
-                                    text = { Text("Attach file") },
-                                    leadingIcon = { Icon(Icons.Outlined.AttachFile, null) },
-                                    onClick = {
-                                        attachmentMenu = false
-                                        actions.onAttachFile()
-                                    },
-                                )
-                                DropdownMenuItem(
-                                    text = { Text("Attach media") },
-                                    leadingIcon = { Icon(Icons.Outlined.Image, null) },
-                                    onClick = {
-                                        attachmentMenu = false
-                                        actions.onAttachMedia()
-                                    },
-                                )
-                                DropdownMenuItem(
-                                    text = { Text("Change directory") },
-                                    leadingIcon = { Icon(Icons.Outlined.CreateNewFolder, null) },
-                                    onClick = {
-                                        attachmentMenu = false
-                                        actions.onProject()
-                                    },
-                                )
-                            }
-                        }
-                        Box(Modifier.weight(1f)) { modelControl() }
-                        FilledIconButton(
-                            onClick =
-                                when {
-                                    state.running -> actions.onStop
-                                    canResumeCancelled -> actions.onResume
-                                    else -> actions.onSend
-                                },
-                            enabled = canSendMessage,
-                            modifier = Modifier.size(48.dp),
-                        ) {
-                            Icon(
-                                when {
-                                    state.running -> Icons.Outlined.Stop
-                                    canResumeCancelled -> Icons.Outlined.PlayArrow
-                                    else -> Icons.Outlined.ArrowUpward
-                                },
-                                when {
-                                    state.running -> "Stop task"
-                                    canResumeCancelled -> "Resume task"
-                                    else -> "Send task message"
-                                },
-                            )
-                        }
+                    if (!state.canSend) {
+                        Text(
+                            "Another task is running. You can browse this conversation while it finishes.",
+                            style = MaterialTheme.typography.labelSmall,
+                            modifier = Modifier.padding(top = 8.dp),
+                        )
                     }
                 }
-            }
-            if (!state.canSend) {
-                Text(
-                    "Another task is running. You can browse this conversation while it finishes.",
-                    style = MaterialTheme.typography.labelSmall,
-                    modifier = Modifier.padding(top = 8.dp),
-                )
             }
         }
     }) { padding ->
@@ -1116,26 +1363,30 @@ fun WorkChatScreen(
                 }
             } else {
                 ChatTimeline(
-                    ChatTimelineUiState(state.conversationId, state.messages, state.streamingResponseId),
+                    ChatTimelineUiState(state.conversationId, timeline.messages, state.streamingResponseId),
                     actions.onCopy,
                     actions.onShare,
                     modifier = Modifier.widthIn(max = 760.dp).fillMaxSize(),
+                    searchOpen = searchOpen,
+                    onSearchOpenChange = { searchOpen = it },
+                    onViewQuiz = { message -> message.quiz?.let { QuizResultActivity.open(context, it) } },
                     toolContent = { message, _, _ ->
-                        state.steps.firstOrNull { it.id == message.id }?.let { step ->
-                            WorkToolEntry(
-                                step,
-                                state.pendingId == step.id,
-                            ) { allow -> actions.onApprove(step.id, allow) }
+                        val group =
+                            timeline.reads[message.id]
+                                ?: state.steps.firstOrNull { it.id == message.id }?.let { listOf(it) }
+                        group?.let { steps ->
+                            WorkToolEntry(steps, state.pendingId) { id, allow -> actions.onApprove(id, allow) }
                         }
                     },
                     trailingContent = {
                         if ((state.running || state.status == "Running" || state.status == "Thinking") &&
                             state.pendingId == null && state.streamingResponseId == null
                         ) {
-                            Row(Modifier.padding(vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
-                                CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
-                                Spacer(Modifier.width(12.dp))
-                                ShimmerStatusText(
+                            BusyStatusRow(
+                                Modifier.fillMaxWidth().padding(top = 20.dp, bottom = 12.dp),
+                                spacing = 12.dp,
+                            ) {
+                                WipeMarqueeStatusText(
                                     state.progress.ifBlank {
                                         if (state.status == "Thinking") {
                                             "Thinking"
@@ -1143,13 +1394,20 @@ fun WorkChatScreen(
                                             "Working…"
                                         }
                                     },
+                                    Modifier.weight(1f),
+                                    surface = cs.background,
                                     style = MaterialTheme.typography.bodyLarge,
-                                    maxLines = 2,
                                 )
                             }
                         } else if (!state.running && state.status != "Running" && state.status != "Thinking") {
                             Text(
-                                "${state.status}\u2002•\u2002Performed ${state.steps.size} action${if (state.steps.size == 1) "" else "s"}",
+                                buildAnnotatedString {
+                                    withStyle(SpanStyle(color = cs.workStatusColor(state.status))) {
+                                        append(state.status)
+                                    }
+                                    append("\u2002•\u2002Performed ${state.steps.size} ")
+                                    append(if (state.steps.size == 1) "action" else "actions")
+                                },
                                 style = MaterialTheme.typography.labelMedium,
                                 color = cs.onSurfaceVariant,
                                 modifier = Modifier.padding(vertical = 12.dp),
@@ -1164,18 +1422,25 @@ fun WorkChatScreen(
 
 @Composable
 fun WorkToolEntry(
-    step: WorkStep,
-    needsApproval: Boolean,
-    onApprove: (Boolean) -> Unit,
+    steps: List<WorkStep>,
+    pendingStepId: String?,
+    onApprove: (String, Boolean) -> Unit,
 ) {
     val cs = MaterialTheme.colorScheme
-    var details by rememberSaveable(step.id) { mutableStateOf(false) }
+    val step = steps.last()
+    var details by rememberSaveable(steps.joinToString("/") { it.id }) { mutableStateOf(false) }
     val args = remember(step.arguments) { runCatching { JSONObject(step.arguments) }.getOrDefault(JSONObject()) }
-    val title = remember(step.tool, step.arguments) { toolLabel(step.tool, args) }
+    val label = remember(step.tool, step.arguments) { toolLabel(step.tool, args) }
+    val title = if (steps.size > 1) "$label ×${steps.size}" else label
+    val running = steps.any { it.state == "Running" }
+    val failed = steps.any { it.state == "Failed" }
+    val pendingStep = steps.firstOrNull { it.id == pendingStepId }
     val icon =
         when (step.tool) {
             "web_search", "web_search_batch", "fetch_url", "find_in_page" -> Icons.Outlined.Public
+            "download_file" -> Icons.Outlined.Download
             "ask_user" -> Icons.Outlined.QuestionAnswer
+            "quiz_user" -> Icons.Outlined.Quiz
             in DeviceTools.names -> Icons.Outlined.Smartphone
             "run_command", "git_status", "git_diff" -> Icons.Outlined.Terminal
             "read_image" -> Icons.Outlined.Image
@@ -1184,30 +1449,54 @@ fun WorkToolEntry(
             "start_task", "read_task_output" -> Icons.Outlined.AddTask
             else -> Icons.Outlined.Description
         }
-    Column(Modifier.fillMaxWidth().testTag("work-tool-${step.id}")) {
-        Surface(onClick = { details = true }, color = cs.background, shape = MaterialTheme.shapes.extraSmall) {
+    val notion =
+        remember(step.tool) {
+            val server = McpToolRouter.registry?.findTool(step.tool)?.first
+            server?.config?.displayName?.contains("notion", ignoreCase = true) == true ||
+                server?.config?.url?.contains("notion", ignoreCase = true) == true ||
+                step.tool.startsWith("mcp_notion_")
+        }
+    val notionPainter = if (notion) painterResource(R.drawable.ic_notion) else null
+    Column(Modifier.fillMaxWidth().testTag("work-tool-${steps.first().id}")) {
+        Surface(color = cs.background, shape = MaterialTheme.shapes.extraSmall) {
             Row(
-                Modifier.fillMaxWidth().heightIn(min = 40.dp),
+                Modifier
+                    .fillMaxWidth()
+                    .clickable { details = true }
+                    .padding(vertical = 8.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                if (step.state == "Running") {
+                if (running) {
                     val pulse by rememberInfiniteTransition(label = "Tool activity").animateFloat(
                         .8f,
                         1f,
                         infiniteRepeatable(tween(700), RepeatMode.Reverse),
                         label = "Tool icon pulse",
                     )
-                    Icon(
-                        icon,
-                        null,
-                        Modifier.size(20.dp).graphicsLayer {
-                            scaleX = pulse
-                            scaleY = pulse
-                            alpha = pulse
-                        },
-                        tint = cs.primary,
-                    )
+                    if (notionPainter != null) {
+                        Icon(
+                            notionPainter,
+                            null,
+                            Modifier.size(16.dp).graphicsLayer {
+                                scaleX = pulse
+                                scaleY = pulse
+                                alpha = pulse
+                            },
+                            tint = cs.primary,
+                        )
+                    } else {
+                        Icon(
+                            icon,
+                            null,
+                            Modifier.size(20.dp).graphicsLayer {
+                                scaleX = pulse
+                                scaleY = pulse
+                                alpha = pulse
+                            },
+                            tint = cs.primary,
+                        )
+                    }
                     ShimmerStatusText(
                         title,
                         Modifier.weight(1f),
@@ -1215,29 +1504,36 @@ fun WorkToolEntry(
                         maxLines = 1,
                     )
                 } else {
-                    Icon(
-                        icon,
-                        null,
-                        Modifier.size(20.dp),
-                        tint =
-                            if (step.state == "Failed") {
-                                cs.error
-                            } else {
-                                cs.onSurfaceVariant
-                            },
-                    )
+                    if (notionPainter != null) {
+                        Icon(
+                            notionPainter,
+                            null,
+                            Modifier.size(16.dp),
+                            tint = if (failed) cs.error else cs.onSurfaceVariant,
+                        )
+                    } else {
+                        Icon(
+                            icon,
+                            null,
+                            Modifier.size(20.dp),
+                            tint = if (failed) cs.error else cs.onSurfaceVariant,
+                        )
+                    }
                     MarqueeTitle(
                         title,
                         Modifier.weight(1f),
                         style = MaterialTheme.typography.bodySmall,
                         surface = cs.background,
-                        color = if (step.state == "Failed") cs.error else cs.onSurfaceVariant,
+                        color = if (failed) cs.error else cs.onSurfaceVariant,
                     )
                 }
                 Icon(Icons.Outlined.ExpandMore, "View tool details", Modifier.size(16.dp), tint = cs.onSurfaceVariant)
             }
         }
-        if (needsApproval) {
+        if (step.tool == "download_file") {
+            step.download?.let { DownloadStatusCard(it, running, failed) }
+        }
+        if (pendingStep != null) {
             Surface(
                 color = cs.surfaceContainer,
                 shape = MaterialTheme.shapes.large,
@@ -1249,8 +1545,8 @@ fun WorkToolEntry(
                         Spacer(Modifier.width(8.dp))
                         Text("Allow this action?", style = MaterialTheme.typography.titleSmall)
                     }
-                    ToolArgumentsView(step.arguments)
-                    if (step.tool in
+                    ToolArgumentsView(pendingStep.arguments)
+                    if (pendingStep.tool in
                         listOf("run_command", "git_status", "git_diff")
                     ) {
                         Text(
@@ -1261,7 +1557,7 @@ fun WorkToolEntry(
                     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                         Button(
                             onClick = {
-                                onApprove(true)
+                                onApprove(pendingStep.id, true)
                             },
                             shape =
                                 groupedRowShape(
@@ -1272,7 +1568,7 @@ fun WorkToolEntry(
                         ) { Text("Allow once") }
                         FilledTonalButton(
                             onClick = {
-                                onApprove(false)
+                                onApprove(pendingStep.id, false)
                             },
                             shape =
                                 groupedRowShape(
@@ -1285,81 +1581,91 @@ fun WorkToolEntry(
                 }
             }
         }
-    }
-    if (details) {
-        HydraBottomSheet(onDismiss = { details = false }) { dismiss ->
-            // The whole sheet scrolls, including its title, so long results get the full height.
-            Column(
-                Modifier
-                    .fillMaxWidth()
-                    .verticalScroll(rememberScrollState())
-                    .padding(horizontal = 16.dp)
-                    .padding(bottom = 24.dp)
-                    .testTag("work-tool-${step.id}-details"),
-            ) {
-                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                    Icon(icon, null, Modifier.size(20.dp), tint = cs.primary)
-                    Spacer(Modifier.width(12.dp))
-                    MarqueeTitle(
-                        title,
-                        Modifier.weight(1f),
-                        surface = cs.surfaceContainerLow,
-                        style = MaterialTheme.typography.titleMedium,
-                    )
-                    IconButton(onClick = dismiss) { Icon(Icons.Outlined.Close, "Close tool details") }
-                }
-                when (step.state) {
-                    "Done", "Failed" -> {
-                        Unit
+        if (details) {
+            HydraBottomSheet(onDismiss = { details = false }) { dismiss ->
+                // The whole sheet scrolls, including its title, so long results get the full height.
+                Column(
+                    Modifier
+                        .fillMaxWidth()
+                        .verticalScroll(rememberScrollState())
+                        .padding(horizontal = 16.dp)
+                        .padding(bottom = 24.dp)
+                        .testTag("work-tool-${steps.first().id}-details"),
+                ) {
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Icon(icon, null, Modifier.size(20.dp), tint = cs.primary)
+                        Spacer(Modifier.width(12.dp))
+                        MarqueeTitle(
+                            title,
+                            Modifier.weight(1f),
+                            surface = cs.surfaceContainerLow,
+                            style = MaterialTheme.typography.titleMedium,
+                        )
+                        IconButton(onClick = dismiss) { Icon(Icons.Outlined.Close, "Close tool details") }
                     }
-
-                    "Running" -> {
-                        Row(Modifier.padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-                            CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
-                            Spacer(Modifier.width(8.dp))
-                            Text("Running", style = MaterialTheme.typography.labelMedium, color = cs.onSurfaceVariant)
-                        }
-                    }
-
-                    else -> {
-                        Text(step.state, style = MaterialTheme.typography.labelMedium, color = cs.onSurfaceVariant)
-                    }
-                }
-                Text(
-                    "Arguments",
-                    style = MaterialTheme.typography.titleSmall,
-                    modifier = Modifier.padding(top = 16.dp, bottom = 8.dp),
-                )
-                ToolArgumentsView(step.arguments)
-                if (step.output.isNotBlank() || step.state == "Failed" || step.state == "Done") {
-                    Column(Modifier.fillMaxWidth().padding(top = 20.dp)) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(6.dp),
-                        ) {
-                            Text("Result", style = MaterialTheme.typography.titleSmall)
-                            when (step.state) {
-                                "Done" -> {
-                                    Icon(
-                                        Icons.Outlined.Check,
-                                        "Done",
-                                        Modifier.size(18.dp),
-                                        tint = cs.success,
-                                    )
-                                }
-
-                                "Failed" -> {
-                                    Icon(
-                                        Icons.Outlined.Close,
-                                        "Failed",
-                                        Modifier.size(18.dp),
-                                        tint = cs.error,
-                                    )
-                                }
+                    when {
+                        running -> {
+                            BusyStatusRow(Modifier.padding(top = 8.dp)) {
+                                Text("Running", style = MaterialTheme.typography.labelMedium, color = cs.onSurfaceVariant)
                             }
                         }
-                        Spacer(Modifier.height(8.dp))
-                        ToolOutputView(step.output)
+
+                        steps.any { it.state !in setOf("Done", "Failed") } -> {
+                            Text(
+                                step.state,
+                                style = MaterialTheme.typography.labelMedium,
+                                color = cs.onSurfaceVariant,
+                            )
+                        }
+
+                        else -> Unit
+                    }
+                    steps.forEachIndexed { index, item ->
+                        if (steps.size > 1) {
+                            Text(
+                                "Read ${index + 1} of ${steps.size}",
+                                style = MaterialTheme.typography.titleSmall,
+                                color = if (item.state == "Failed") cs.error else cs.onSurface,
+                                modifier = Modifier.padding(top = 16.dp),
+                            )
+                        }
+                        Text(
+                            "Arguments",
+                            style = MaterialTheme.typography.titleSmall,
+                            modifier = Modifier.padding(top = if (steps.size > 1) 8.dp else 16.dp, bottom = 8.dp),
+                        )
+                        ToolArgumentsView(item.arguments)
+                        if (item.output.isNotBlank() || item.state == "Failed" || item.state == "Done") {
+                            Column(Modifier.fillMaxWidth().padding(top = 20.dp)) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                ) {
+                                    Text("Result", style = MaterialTheme.typography.titleSmall)
+                                    when (item.state) {
+                                        "Done" -> {
+                                            Icon(
+                                                Icons.Outlined.Check,
+                                                "Done",
+                                                Modifier.size(18.dp),
+                                                tint = cs.success,
+                                            )
+                                        }
+
+                                        "Failed" -> {
+                                            Icon(
+                                                Icons.Outlined.Close,
+                                                "Failed",
+                                                Modifier.size(18.dp),
+                                                tint = cs.error,
+                                            )
+                                        }
+                                    }
+                                }
+                                Spacer(Modifier.height(8.dp))
+                                ToolOutputView(item.output)
+                            }
+                        }
                     }
                 }
             }
@@ -1394,6 +1700,7 @@ internal fun toolLabel(
     val path = args.optString("path").substringAfterLast('/')
     return when (name) {
         "ask_user" -> "Ask a few questions"
+        "quiz_user" -> "Quiz the user"
         "web_search_batch" -> "Research the web"
         "find_in_page" -> "Find relevant passages"
         "get_time" -> "Check the current time"
@@ -1404,7 +1711,7 @@ internal fun toolLabel(
         "list_scheduled_tasks" -> "Check scheduled tasks"
         "update_scheduled_task" -> "Update a schedule"
         "cancel_scheduled_task" -> "Cancel a schedule"
-        in DeviceTools.names -> name.replace('_', ' ').replaceFirstChar { it.uppercase() }
+        in DeviceTools.names -> humanizedLabel(name)
         "list_files" -> "List ${path.ifBlank{"project files"}}"
         "list_files_recursive" -> "List files recursively in ${path.ifBlank{"project"}}"
         "read_file" -> "Read $path"
@@ -1423,27 +1730,14 @@ internal fun toolLabel(
         "copy_file" -> "Copy ${args.optString("source")} → ${args.optString("destination")}"
         "web_search" -> "Search the web: ${args.optString("query")}"
         "fetch_url" -> "Read ${args.optString("url")}"
+        "download_file" ->
+            "Download " +
+                args.optString("path").substringAfterLast('/').ifBlank {
+                    downloadFileName(args.optString("url"), null)
+                }
         "git_status" -> "Check Git status"
         "git_diff" -> "Inspect Git diff"
         else -> name.replace('_', ' ')
-    }
-}
-
-@Composable
-private fun WorkError(
-    text: String,
-    onDismiss: () -> Unit,
-) {
-    Surface(color = MaterialTheme.colorScheme.errorContainer, shape = MaterialTheme.shapes.large) {
-        Row(Modifier.padding(start = 16.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text(
-                text,
-                Modifier.weight(1f),
-                color = MaterialTheme.colorScheme.onErrorContainer,
-                style = MaterialTheme.typography.bodyMedium,
-            )
-            IconButton(onClick = onDismiss) { Icon(Icons.Outlined.Close, "Dismiss error") }
-        }
     }
 }
 

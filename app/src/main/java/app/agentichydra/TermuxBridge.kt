@@ -67,7 +67,7 @@ internal fun diagnoseTermuxFailure(raw: String): TermuxIssue? {
         "did not return a result within" in message || "three minutes" in message -> {
             TermuxIssue(
                 "Termux never answered",
-                "The command ran, but Termux never reported back, so it may have closed mid-run. Open Termux to check its sessions, then try again.",
+                "Android couldn't reach a running Termux session, so the command was dropped. Open Termux and keep it in the background, then try again.",
                 TermuxIssueAction.OPEN_TERMUX,
             )
         }
@@ -116,6 +116,7 @@ object TermuxBridge {
         context: Context,
         directory: String,
         command: String,
+        timeoutMillis: Long = 180_000,
     ): TermuxResult {
         check(installed(context)) { "Install Termux from F-Droid or its official GitHub releases first." }
         check(allowed(context)) { "Grant Hydra the Termux Run Commands permission in User → Termux setup." }
@@ -147,10 +148,11 @@ object TermuxBridge {
                 throw e
             }
             return try {
-                withTimeout(180_000) { result.await() }
+                withTimeout(timeoutMillis) { result.await() }
             } catch (_: TimeoutCancellationException) {
                 throw TermuxOfflineException(
-                    "Termux didn't respond within three minutes. It may be closed or busy. Open Termux, then retry this command once.",
+                    "Termux did not return a result within ${timeoutMillis / 1000} seconds. " +
+                        "It may be closed or busy. Open Termux, then retry this command once.",
                 )
             }
         } finally {

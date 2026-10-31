@@ -1,9 +1,9 @@
 package app.agentichydra
 
+import app.agentichydra.mcp.McpSettingsPage
+
 import android.content.Context
-import android.content.Intent
 import android.content.res.Configuration
-import android.net.Uri
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -33,18 +33,22 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.tooling.preview.Preview
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 class LanguageActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
+        setTheme(if (isAppDarkTheme(this)) R.style.AppThemeDark else R.style.AppThemeLight)
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         setContent { HydraTheme { SettingsPage("language") { finish() } } }
@@ -53,10 +57,11 @@ class LanguageActivity : ComponentActivity() {
 
 class SettingsActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
+        setTheme(if (isAppDarkTheme(this)) R.style.AppThemeDark else R.style.AppThemeLight)
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         val page =
-            intent.getStringExtra("page").takeIf { it in setOf("termux", "privacy", "storage", "about", "language") }
+            intent.getStringExtra("page").takeIf { it in setOf("termux", "privacy", "storage", "about", "language", "mcp") }
                 ?: "about"
         setContent { HydraTheme { SettingsPage(page) { finish() } } }
     }
@@ -70,12 +75,14 @@ internal fun SettingsPage(
 ) {
     val cs = MaterialTheme.colorScheme
     val context = LocalContext.current
+    val externalPrompt = rememberExternalIntentPrompt()
     val title =
         when (page) {
             "termux" -> "Termux setup"
             "privacy" -> "Privacy"
             "storage" -> "Storage"
             "language" -> "Language"
+            "mcp" -> "MCP servers"
             else -> "About"
         }
     Scaffold(
@@ -96,7 +103,13 @@ internal fun SettingsPage(
             var clearAll by remember { mutableStateOf(false) }
 
             if (page == "termux") {
-                Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) { TermuxSetupPage() }
+                Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+                    TermuxSetupPage(externalPrompt)
+                }
+            } else if (page == "mcp") {
+                Box(Modifier.fillMaxSize()) {
+                    McpSettingsPage()
+                }
             } else if (page == "about") {
                 Box(Modifier.fillMaxSize()) {
                     Column(
@@ -126,9 +139,7 @@ internal fun SettingsPage(
                             )
                             Text("by", modifier = Modifier.align(Alignment.CenterVertically))
                             TextButton(onClick = {
-                                context.startActivity(
-                                    Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/theonlyasdk")),
-                                )
+                                openExternally(context, "https://github.com/theonlyasdk", externalPrompt)
                             }) {
                                 Icon(
                                     painterResource(R.drawable.ic_github),
@@ -159,14 +170,7 @@ internal fun SettingsPage(
                     }
                 }
             } else {
-                Column(
-                    Modifier
-                        .widthIn(max = 840.dp)
-                        .fillMaxWidth()
-                        .verticalScroll(rememberScrollState())
-                        .padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(16.dp),
-                ) {
+                SettingsPageColumn(spacing = 16.dp) {
                     when (page) {
                         "privacy" -> {
                             Text("The short version", style = MaterialTheme.typography.titleLarge)
@@ -180,7 +184,7 @@ internal fun SettingsPage(
                                 "When the agent does tasks for you, it may search the web, look up public web pages, and run commands on your phone — but it asks for your permission before every device action, you watch each step in the task chat, and it only touches the project folder you chose for that task.",
                             )
                             Text(
-                                "Your connection settings (like API keys) are encrypted with your phone’s secure hardware and never leave the device. Web searches go to public search services; page requests go to the sites you asked about. Nothing else, and no one else.",
+                                "Your connection settings (like API keys) are encrypted with your phone’s secure hardware and never leave the device. The one exception is a settings backup you start yourself: a file you export or a code you share carries those keys in clear text, so keep them somewhere private. Web searches go to public search services; page requests go to the sites you asked about. Nothing else, and no one else.",
                             )
                         }
 
@@ -196,6 +200,12 @@ internal fun SettingsPage(
                                 "Each task remembers its own project folder, and new tasks start in the last folder you used. Deleting a conversation never touches your actual files — those stay right where they are.",
                             )
                             Spacer(Modifier.height(8.dp))
+                            Text("Move your setup to another phone", style = MaterialTheme.typography.titleMedium)
+                            Text(
+                                "Export writes the same setup Share shows as QR codes into one file you can keep or open on another phone. What travels — connection, API keys, appearance and approvals, and optionally your conversations — is picked with the ticks on Share settings. Keys travel unencrypted, so use a private room and a device you trust.",
+                            )
+                            ConfigTransferRows()
+                            Spacer(Modifier.height(8.dp))
                             Button(
                                 onClick = { clearAll = true },
                                 modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
@@ -210,21 +220,147 @@ internal fun SettingsPage(
             }
 
             if (clearAll) {
-                AlertDialog(
-                    onDismissRequest = { clearAll = false },
-                    title = { Text("Clear all chats?") },
-                    text = { Text("Every conversation with the agent will be deleted. This cannot be undone.") },
-                    confirmButton = {
-                        TextButton(onClick = {
-                            clearAll = false
-                            val chat = (context.applicationContext as HydraApplication).models[HydraModel::class.java]
-                            chat.clearAllConversations()
-                        }) { Text("Delete all") }
+                ConfirmDialog(
+                    title = "Clear all chats?",
+                    body = "Every conversation with the agent will be deleted. This cannot be undone.",
+                    confirmLabel = "Delete all",
+                    onConfirm = {
+                        clearAll = false
+                        val chat = (context.applicationContext as HydraApplication).models[HydraModel::class.java]
+                        chat.clearAllConversations()
                     },
-                    dismissButton = { TextButton(onClick = { clearAll = false }) { Text("Cancel") } },
+                    onDismiss = { clearAll = false },
                 )
             }
         }
+    }
+    ExternalIntentHost(externalPrompt)
+}
+
+@Composable
+internal fun SettingsPageColumn(
+    spacing: Dp,
+    content: @Composable ColumnScope.() -> Unit,
+) {
+    Column(
+        Modifier
+            .widthIn(max = 840.dp)
+            .fillMaxWidth()
+            .verticalScroll(rememberScrollState())
+            .padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(spacing),
+        content = content,
+    )
+}
+
+/**
+ * Settings leave this phone as a file the user picks a place for, or as QR codes the other phone
+ * scans. Both carry whatever is ticked on Share settings.
+ */
+@Composable
+private fun ConfigTransferRows() {
+    val cs = MaterialTheme.colorScheme
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var notice by remember { mutableStateOf<String?>(null) }
+    var failure by remember { mutableStateOf<String?>(null) }
+    var incoming by remember { mutableStateOf<String?>(null) }
+    var preview by remember { mutableStateOf<ConfigSummary?>(null) }
+
+    val exporter =
+        rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri ->
+            if (uri == null) return@rememberLauncherForActivityResult
+            scope.launch {
+                runCatching {
+                    withContext(Dispatchers.IO) {
+                        val body = configBundle(context, ConfigSelectionStore.load(context))
+                        val output =
+                            context.contentResolver.openOutputStream(uri, "wt")
+                                ?: error("Hydra could not open that location.")
+                        output.use { it.write(body.toByteArray(Charsets.UTF_8)) }
+                    }
+                }.onSuccess { notice = "Settings exported" }
+                    .onFailure { failure = it.message ?: "The settings could not be exported." }
+            }
+        }
+    // Pickers label a .json file however they like, so the bundle itself decides what is readable.
+    val importer =
+        rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+            if (uri == null) return@rememberLauncherForActivityResult
+            scope.launch {
+                runCatching {
+                    withContext(Dispatchers.IO) {
+                        val input =
+                            context.contentResolver.openInputStream(uri)
+                                ?: error("Hydra could not read that file.")
+                        input.use { it.readBytes().toString(Charsets.UTF_8) }
+                    }
+                }.onSuccess { bundle ->
+                    runCatching { readConfigSummary(bundle) }
+                        .onSuccess {
+                            preview = it
+                            incoming = bundle
+                        }.onFailure { failure = it.message ?: "That is not a Hydra settings file." }
+                }.onFailure { failure = it.message ?: "That file could not be read." }
+            }
+        }
+
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            TransferButton(Icons.Outlined.FileDownload, "Export", Modifier.weight(1f)) {
+                notice = null
+                failure = null
+                exporter.launch(CONFIG_FILE_NAME)
+            }
+            TransferButton(Icons.Outlined.FileUpload, "Import", Modifier.weight(1f)) {
+                notice = null
+                failure = null
+                importer.launch(arrayOf("*/*"))
+            }
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            TransferButton(Icons.Outlined.QrCode, "Share", Modifier.weight(1f)) {
+                ShareConfigActivity.open(context)
+            }
+            TransferButton(Icons.Outlined.QrCodeScanner, "Receive", Modifier.weight(1f)) {
+                ReceiveConfigActivity.open(context)
+            }
+        }
+    }
+    notice?.let {
+        Text(it, style = MaterialTheme.typography.labelLarge, color = cs.onSurfaceVariant)
+    }
+    failure?.let { ErrorBanner(it) }
+
+    incoming?.let { bundle ->
+        ConfirmDialog(
+            title = "Import these settings?",
+            body = preview?.body ?: "This phone received a Hydra settings bundle.",
+            confirmLabel = "Import",
+            onConfirm = {
+                incoming = null
+                scope.launch {
+                    runCatching { applyConfig(context.applicationContext, bundle) }
+                        .onSuccess { notice = "Settings imported" }
+                        .onFailure { failure = it.message ?: "Those settings could not be applied." }
+                }
+            },
+            onDismiss = { incoming = null },
+        )
+    }
+}
+
+@Composable
+private fun TransferButton(
+    icon: ImageVector,
+    label: String,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit,
+) {
+    OutlinedButton(onClick, modifier.heightIn(min = 48.dp)) {
+        Icon(icon, null, Modifier.size(18.dp))
+        Spacer(Modifier.width(8.dp))
+        Text(label)
     }
 }
 
@@ -255,7 +391,7 @@ private data class TermuxSetupUiState(
 )
 
 @Composable
-internal fun TermuxSetupPage() {
+internal fun TermuxSetupPage(prompt: ExternalIntentPrompt? = null) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var state by remember { mutableStateOf(TermuxSetupUiState()) }
@@ -283,20 +419,15 @@ internal fun TermuxSetupPage() {
         if (state.phase == TermuxSetupPhase.Checking) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { TermuxCheckingStatus() }
         } else {
-            Column(
-                Modifier
-                    .widthIn(max = 840.dp)
-                    .fillMaxWidth()
-                    .verticalScroll(rememberScrollState())
-                    .padding(16.dp),
-                verticalArrangement = Arrangement.spacedBy(24.dp),
-            ) {
+            SettingsPageColumn(spacing = 24.dp) {
                 TermuxSetupContent(
                     state,
                     onGrant = { permission.launch("com.termux.permission.RUN_COMMAND") },
                     onInstall = {
-                        context.startActivity(
-                            Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/termux/termux-app#installation")),
+                        openExternally(
+                            context,
+                            "https://github.com/termux/termux-app#installation",
+                            prompt,
                         )
                     },
                     onOpenTermux = { TermuxBridge.open(context) },
@@ -312,7 +443,9 @@ private suspend fun runTermuxProbe(context: Context): TermuxSetupUiState {
     if (!TermuxBridge.installed(context)) return TermuxSetupUiState(TermuxSetupPhase.Install, granted = granted)
     if (!granted) return TermuxSetupUiState(TermuxSetupPhase.Permission)
     return try {
-        val result = TermuxBridge.execute(context, "", "echo Hydra ready")
+        // An open Termux answers in well under a second, so a short deadline reports a closed
+        // Termux while the echo test is still on screen instead of spinning.
+        val result = TermuxBridge.execute(context, "", "echo Hydra ready", timeoutMillis = 5_000)
         if (result.exitCode == 0 && result.stdout.contains("Hydra")) {
             TermuxSetupUiState(TermuxSetupPhase.Ready, granted = true)
         } else {
@@ -618,16 +751,8 @@ private fun TermuxFaqRow(
 
 @Composable
 private fun TermuxCheckingStatus() {
-    val messages =
-        remember { listOf("Looking for Termux…", "Running a quick echo test…", "This usually takes a few seconds…") }
-    var index by remember { mutableIntStateOf(0) }
-    LaunchedEffect(Unit) {
-        while (true) {
-            delay(2600)
-            index = (index + 1) % messages.size
-        }
-    }
-    TermuxCheckingStatusContent(messages[index])
+    // The install and permission checks are instant, so the whole wait is the echo test.
+    TermuxCheckingStatusContent("Running a quick echo test…")
 }
 
 @Composable

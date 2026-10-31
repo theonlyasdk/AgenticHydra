@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Parallax: the covered screen recedes to the left instead of sitting still. -->
+<translate xmlns:android="http://schemas.android.com/apk/res/android"
+    android:duration="340"
+    android:fromXDelta="0%p"
+    android:interpolator="@android:interpolator/decelerate_quint"
+    android:toXDelta="-24%p" />

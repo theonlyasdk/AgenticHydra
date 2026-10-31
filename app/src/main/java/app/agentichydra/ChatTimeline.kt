@@ -3,7 +3,9 @@ package app.agentichydra
 import android.content.res.Configuration
 import android.text.format.DateFormat
 import android.text.format.DateUtils
+import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.expandVertically
@@ -12,10 +14,13 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
 import androidx.compose.animation.shrinkVertically
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.interaction.collectIsDraggedAsState
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -41,6 +46,7 @@ import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
 import androidx.compose.ui.input.nestedscroll.NestedScrollSource
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -50,6 +56,7 @@ import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.Velocity
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlin.math.roundToInt
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.util.Date
@@ -106,11 +113,82 @@ fun ChatTimeline(
     toolContent: (@Composable (Message, Int, Int) -> Unit)? = null,
     trailingContent: (@Composable () -> Unit)? = null,
     messageActions: MessageLongPressActions? = null,
+    searchOpen: Boolean = false,
+    onSearchOpenChange: (Boolean) -> Unit = {},
+    onViewQuiz: ((Message) -> Unit)? = null,
     showHydraTitle: Boolean = LocalHydraTitleVisible.current,
 ) {
     var following by rememberSaveable(state.conversationId) { mutableStateOf(true) }
     val dragging by listState.interactionSource.collectIsDraggedAsState()
     val scope = rememberCoroutineScope()
+    val focusManager = LocalFocusManager.current
+    var typed by rememberSaveable(state.conversationId) { mutableStateOf("") }
+    var query by rememberSaveable(state.conversationId) { mutableStateOf("") }
+    val matches = remember(state.messages, query) { chatMatches(state.messages, query) }
+    val matchGroups = remember(matches) { messageMatchGroups(matches) }
+    var cursor by remember(state.conversationId) { mutableStateOf(0) }
+    val activeMatch = if (matches.isEmpty()) -1 else cursor.coerceIn(0, matches.lastIndex)
+    val searchClearance by animateDpAsState(
+        targetValue = if (searchOpen) 84.dp else 16.dp,
+        animationSpec = spring(stiffness = 520f),
+        label = "Search clearance",
+    )
+    // While tokens stream in, keep the growing tail a couple of lines clear of the composer.
+    val tailClearance by animateDpAsState(
+        targetValue = if (state.streamingResponseId != null) 64.dp else 16.dp,
+        animationSpec = spring(stiffness = 520f),
+        label = "Streaming tail clearance",
+    )
+
+    suspend fun revealMatch(match: ChatMatch) {
+        val text = state.messages.getOrNull(match.itemIndex)?.text.orEmpty()
+        var layout = listState.layoutInfo.visibleItemsInfo.firstOrNull { it.index == match.itemIndex }
+        if (layout == null) {
+            listState.scrollToItem(match.itemIndex)
+            // Let the row measure first, so a jump is never followed by a correction.
+            withFrameNanos { }
+            layout = listState.layoutInfo.visibleItemsInfo.firstOrNull { it.index == match.itemIndex } ?: return
+        }
+        val viewport = listState.layoutInfo.viewportEndOffset - listState.layoutInfo.viewportStartOffset
+        if (text.isEmpty() || layout.size <= viewport) return
+        // A character ratio is the only position estimate available for a message taller than the screen.
+        val ratio = (match.offset.toFloat() / text.length).coerceIn(0f, 1f)
+        val inside = (ratio * layout.size).roundToInt()
+        val top = layout.offset + inside
+        val viewportStart = listState.layoutInfo.viewportStartOffset
+        // A match already in the middle band stays put, so stepping through a long message
+        // never scrolls away and back again.
+        if (top in (viewportStart + viewport / 4)..(viewportStart + viewport * 3 / 4)) return
+        val target = (inside - viewport / 3).coerceIn(0, layout.size - viewport)
+        listState.scrollToItem(match.itemIndex, target)
+    }
+
+    fun goToMatch(target: Int) {
+        if (matches.isEmpty()) return
+        val index = ((target % matches.size) + matches.size) % matches.size
+        cursor = index
+        // Searching is deliberate navigation; stop sticking to the streaming tail.
+        following = false
+        scope.launch { revealMatch(matches[index]) }
+    }
+
+    fun closeSearch() {
+        typed = ""
+        query = ""
+        onSearchOpenChange(false)
+        focusManager.clearFocus()
+    }
+
+    LaunchedEffect(typed) {
+        delay(220)
+        query = typed
+    }
+    LaunchedEffect(query, state.conversationId) {
+        cursor = 0
+        if (query.isNotBlank() && matches.isNotEmpty()) goToMatch(0)
+    }
+
+    BackHandler(enabled = searchOpen) { closeSearch() }
     val atBottom by remember(listState) { derivedStateOf { !listState.canScrollForward } }
     val atTop by remember(listState) { derivedStateOf { !listState.canScrollBackward } }
     val timeMarkers = remember(state.messages) { chatTimeMarkerIds(state.messages) }
@@ -185,17 +263,45 @@ fun ChatTimeline(
         LazyColumn(
             state = listState,
             modifier = Modifier.fillMaxSize().nestedScroll(userScroll).testTag("chat-timeline"),
-            contentPadding = PaddingValues(horizontal = 24.dp, vertical = 16.dp),
+            contentPadding = PaddingValues(start = 24.dp, top = searchClearance, end = 24.dp, bottom = tailClearance),
         ) {
             itemsIndexed(state.messages, key = { _, message -> message.id }) { index, message ->
                 val adjacentTool = message.role == "tool" && state.messages.getOrNull(index + 1)?.role == "tool"
                 val followedByTool = message.role == "assistant" && state.messages.getOrNull(index + 1)?.role == "tool"
+                val precededByTool = message.role == "assistant" && state.messages.getOrNull(index - 1)?.role == "tool"
+                val next = state.messages.getOrNull(index + 1)
+                val group = matchGroups[message.id]
+                val highlight =
+                    group?.let {
+                        ChatHighlight(
+                            query,
+                            if (activeMatch >= 0 && matches[activeMatch].messageId == message.id) {
+                                activeMatch - it.first
+                            } else {
+                                -1
+                            },
+                        )
+                    }
+                val invisibleAssistant =
+                    message.role == "assistant" &&
+                        message.text.isBlank() &&
+                        message.thought.isBlank() &&
+                        message.id != state.streamingResponseId
+                val hiddenAssistantBeforeTool =
+                    message.role == "tool" &&
+                        next?.role == "assistant" &&
+                        next.text.isBlank() &&
+                        next.thought.isBlank() &&
+                        next.id != state.streamingResponseId &&
+                        state.messages.getOrNull(index + 2)?.role == "tool"
                 Column(
                     Modifier.fillMaxWidth().padding(
                         bottom =
                             when {
-                                adjacentTool -> 0.dp
-                                followedByTool -> 8.dp
+                                invisibleAssistant -> 0.dp
+                                message.role == "tool" && (adjacentTool || hiddenAssistantBeforeTool) -> 0.dp
+                                message.role == "tool" -> if (index < state.messages.lastIndex) 4.dp else 0.dp
+                                followedByTool -> 4.dp
                                 index < state.messages.lastIndex -> 24.dp
                                 else -> 0.dp
                             },
@@ -245,6 +351,9 @@ fun ChatTimeline(
                                         prompt,
                                         showHydraTitle,
                                         followedByTool,
+                                        precededByTool,
+                                        highlight,
+                                        onViewQuiz = onViewQuiz?.let { open -> { open(message) } },
                                     )
                                 }
                                 MessageActionMenu(
@@ -310,6 +419,26 @@ fun ChatTimeline(
             ) {
                 Icon(Icons.Outlined.ArrowDownward, "Jump to latest")
             }
+        }
+        AnimatedVisibility(
+            visible = searchOpen,
+            enter = slideInVertically(spring(stiffness = 520f)) { -it } + fadeIn(spring(stiffness = 520f)),
+            exit = slideOutVertically(spring(stiffness = 520f)) { -it } + fadeOut(spring(stiffness = 520f)),
+            modifier =
+                Modifier
+                    .align(Alignment.TopCenter)
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 8.dp),
+        ) {
+            ChatFindBar(
+                query = typed,
+                onQuery = { typed = it },
+                matchCount = matches.size,
+                activeIndex = activeMatch,
+                onPrevious = { goToMatch(cursor - 1) },
+                onNext = { goToMatch(cursor + 1) },
+                onClose = { closeSearch() },
+            )
         }
     }
 }
@@ -424,6 +553,9 @@ private fun ChatMessageContent(
     prompt: String = "",
     showHydraTitle: Boolean = LocalHydraTitleVisible.current,
     followedByTool: Boolean = false,
+    precededByTool: Boolean = false,
+    highlight: ChatHighlight? = null,
+    onViewQuiz: (() -> Unit)? = null,
 ) {
     val cs = MaterialTheme.colorScheme
     if (message.role == "user") {
@@ -437,7 +569,7 @@ private fun ChatMessageContent(
                     if (message.text.isNotBlank()) {
                         SelectionContainer {
                             Text(
-                                message.text,
+                                searchHighlighted(message.text, highlight),
                                 style = MaterialTheme.typography.bodyLarge,
                             )
                         }
@@ -466,17 +598,18 @@ private fun ChatMessageContent(
         val isFinalSummary = message.finalResponse && !followedByTool && !streaming
         Column {
             if (showHydraTitle && isFinalSummary) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    HydraMark(Modifier.size(20.dp))
-                    Spacer(Modifier.width(8.dp))
+                Row(
+                    modifier = Modifier.padding(top = if (precededByTool) 20.dp else 0.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    HydraMark(Modifier.size(16.dp))
+                    Spacer(Modifier.width(6.dp))
                     Text("HYDRA", style = MaterialTheme.typography.labelSmall, color = cs.primary)
                 }
-                Spacer(Modifier.height(12.dp))
+                Spacer(Modifier.height(6.dp))
             }
             if (message.text.isBlank() && message.thought.isBlank() && streaming) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
-                    Spacer(Modifier.width(8.dp))
+                BusyStatusRow {
                     val initialThinking =
                         remember(prompt) {
                             if (prompt.isNotBlank()) ThinkingMessages.initialDescription(prompt) else "Thinking…"
@@ -488,7 +621,7 @@ private fun ChatMessageContent(
                             value = iterator.next()
                         }
                     }
-                    ShimmerStatusText(thinkingText, style = MaterialTheme.typography.bodyMedium)
+                    WipeStatusText(thinkingText, style = MaterialTheme.typography.bodyMedium)
                 }
             }
             if (message.thought.isNotBlank()) {
@@ -507,13 +640,15 @@ private fun ChatMessageContent(
                 )
             }
             if (message.text.isNotBlank()) {
-                if (message.thought.isNotBlank()) Spacer(Modifier.height(8.dp))
-                MarkdownBody(message.text)
+                if (message.thought.isNotBlank()) Spacer(Modifier.height(4.dp))
+                MarkdownBody(message.text, highlight = highlight, streaming = streaming)
                 if (isFinalSummary) {
                     ResponseActions(
                         message,
                         onCopy = { onCopy(message) },
                         onShare = { onShare(message) },
+                        quiz = message.quiz,
+                        onViewQuiz = onViewQuiz,
                     )
                 }
             }
@@ -608,36 +743,20 @@ private fun MessageActionMenu(
     enabled: Boolean = true,
     onDismiss: () -> Unit,
 ) {
-    val cs = MaterialTheme.colorScheme
-    DropdownMenu(
-        expanded = expanded,
-        onDismissRequest = onDismiss,
-        shape = MaterialTheme.shapes.large,
-        containerColor = cs.surfaceContainerHigh,
-    ) {
-        DropdownMenuItem(text = { Text("Copy") }, leadingIcon = { Icon(Icons.Outlined.ContentCopy, null) }, onClick = {
+    HydraOverflowMenu(expanded = expanded, onDismiss = onDismiss) {
+        HydraMenuItem("Copy", Icons.Outlined.ContentCopy) {
             onDismiss()
             onCopy(message)
-        })
+        }
         if (message.role == "assistant" && actions != null) {
-            DropdownMenuItem(
-                text = { Text("Regenerate") },
-                leadingIcon = { Icon(Icons.Outlined.Refresh, null) },
-                enabled = enabled,
-                onClick = {
-                    onDismiss()
-                    actions.onRegenerate(message)
-                },
-            )
-            DropdownMenuItem(
-                text = { Text("Revert") },
-                leadingIcon = { Icon(Icons.AutoMirrored.Outlined.Undo, null) },
-                enabled = enabled,
-                onClick = {
-                    onDismiss()
-                    actions.onRevert(message)
-                },
-            )
+            HydraMenuItem("Regenerate", Icons.Outlined.Refresh, enabled = enabled) {
+                onDismiss()
+                actions.onRegenerate(message)
+            }
+            HydraMenuItem("Revert", Icons.AutoMirrored.Outlined.Undo, enabled = enabled) {
+                onDismiss()
+                actions.onRevert(message)
+            }
         }
     }
 }
@@ -647,6 +766,8 @@ private fun ResponseActions(
     message: Message,
     onCopy: () -> Unit,
     onShare: () -> Unit,
+    quiz: QuizAttempt? = null,
+    onViewQuiz: (() -> Unit)? = null,
 ) {
     val cs = MaterialTheme.colorScheme
     val time = message.metrics?.completedAt ?: message.createdAt
@@ -665,14 +786,25 @@ private fun ResponseActions(
             }
             if (clock.isNotBlank()) add(clock)
         }
+    if (quiz != null && onViewQuiz != null) {
+        FilledTonalButton(
+            onClick = onViewQuiz,
+            modifier = Modifier.padding(top = 8.dp).heightIn(min = 48.dp),
+            contentPadding = PaddingValues(horizontal = 16.dp),
+        ) {
+            Icon(Icons.Outlined.Quiz, null, Modifier.size(18.dp))
+            Spacer(Modifier.width(8.dp))
+            Text("View quiz results")
+        }
+    }
     Row(Modifier.fillMaxWidth().padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-        IconButton(onClick = onCopy, modifier = Modifier.size(48.dp)) {
-            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.CenterStart) {
+        IconButton(onClick = onCopy, modifier = Modifier.size(36.dp)) {
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 Icon(Icons.Outlined.ContentCopy, "Copy response", Modifier.size(18.dp), tint = cs.onSurfaceVariant)
             }
         }
-        IconButton(onClick = onShare, modifier = Modifier.size(48.dp)) {
-            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.CenterStart) {
+        IconButton(onClick = onShare, modifier = Modifier.size(36.dp)) {
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 Icon(Icons.Outlined.Share, "Share response", Modifier.size(18.dp), tint = cs.onSurfaceVariant)
             }
         }

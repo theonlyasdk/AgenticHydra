@@ -1,7 +1,6 @@
 package app.agentichydra
 
 import android.animation.ValueAnimator
-import android.content.Intent
 import android.os.Bundle
 import android.provider.OpenableColumns
 import android.view.animation.DecelerateInterpolator
@@ -10,6 +9,12 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.*
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -17,8 +22,6 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.NoteAdd
 import androidx.compose.material.icons.outlined.*
@@ -27,7 +30,6 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
@@ -38,16 +40,9 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.AnnotatedString
-import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.KeyboardType
-import androidx.compose.ui.text.input.PasswordVisualTransformation
-import androidx.compose.ui.text.input.VisualTransformation
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
-import androidx.lifecycle.viewmodel.compose.viewModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -126,7 +121,10 @@ fun ChatScreen(vm: HydraModel) {
     var draft by rememberSaveable { mutableStateOf("") }
     var showConnection by rememberSaveable { mutableStateOf(false) }
     var showModels by rememberSaveable { mutableStateOf(false) }
+    var showContext by rememberSaveable { mutableStateOf(false) }
+    var searchOpen by rememberSaveable { mutableStateOf(false) }
     val listState = rememberLazyListState()
+    LaunchedEffect(ContextBudget.tokens) { vm.refreshContextUsage() }
     val context = LocalContext.current
     var renameTarget by remember { mutableStateOf<Conversation?>(null) }
     var deleteTarget by remember { mutableStateOf<Conversation?>(null) }
@@ -269,117 +267,124 @@ fun ChatScreen(vm: HydraModel) {
                         Spacer(Modifier.width(8.dp))
                         Text("hydra", style = MaterialTheme.typography.hydraTitle)
                         Spacer(Modifier.weight(1f))
+                        ContextRingButton(vm.contextUsage, onClick = { showContext = true })
                         HintIconButton("Start a new chat", Icons.AutoMirrored.Outlined.NoteAdd, onClick = {
                             vm.newChat()
                             draft = ""
                         })
+                        if (vm.messages.isNotEmpty()) {
+                            HintIconButton("Search in conversation", Icons.Outlined.Search, onClick = { searchOpen = true })
+                        }
                     }
                 }
             },
             bottomBar = {
                 Column(Modifier.imePadding().widthIn(max = 840.dp).fillMaxWidth()) {
                     vm.error?.let { error ->
-                        Surface(
-                            color = cs.errorContainer,
-                            shape = RoundedCornerShape(16.dp),
+                        ErrorBanner(
+                            error,
+                            onDismiss = { vm.error = null },
                             modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
-                        ) {
-                            Row(
-                                Modifier.padding(start = 16.dp, top = 8.dp, bottom = 8.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                            ) {
-                                Text(
-                                    error,
-                                    Modifier.weight(1f),
-                                    color = cs.onErrorContainer,
-                                    style = MaterialTheme.typography.bodyMedium,
-                                )
-                                IconButton(
-                                    onClick = { vm.error = null },
-                                ) { Icon(Icons.Outlined.Close, "Dismiss error", tint = cs.onErrorContainer) }
-                            }
-                        }
+                            contentPadding = PaddingValues(start = 16.dp, top = 8.dp, bottom = 8.dp),
+                        )
                     }
-                    Surface(
-                        color = cs.surfaceContainer,
-                        shape = RoundedCornerShape(28.dp),
-                        shadowElevation = 2.dp,
-                        modifier = Modifier.padding(horizontal = 16.dp).fillMaxWidth(),
+                    AnimatedVisibility(
+                        visible = !searchOpen,
+                        enter = expandVertically(spring(stiffness = 520f)) + fadeIn(spring(stiffness = 520f)),
+                        exit = shrinkVertically(spring(stiffness = 520f)) + fadeOut(spring(stiffness = 520f)),
                     ) {
-                        Column(Modifier.padding(8.dp)) {
-                            vm.attachment?.let { attachment ->
-                                InputChip(
-                                    selected = true,
-                                    onClick = {},
-                                    label = { Text(attachment.first, maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                                    trailingIcon = {
-                                        IconButton(
-                                            onClick = {
-                                                vm.attachment = null
+                        Column {
+                            Surface(
+                                color = cs.surfaceContainer,
+                                shape = RoundedCornerShape(28.dp),
+                                shadowElevation = 2.dp,
+                                modifier = Modifier.padding(horizontal = 16.dp).fillMaxWidth(),
+                            ) {
+                                Column(Modifier.padding(8.dp)) {
+                                    vm.attachment?.let { attachment ->
+                                        InputChip(
+                                            selected = true,
+                                            onClick = {},
+                                            label = {
+                                                Text(
+                                                    attachment.first,
+                                                    maxLines = 1,
+                                                    overflow = TextOverflow.Ellipsis,
+                                                )
                                             },
-                                            modifier =
-                                                Modifier.size(
-                                                    48.dp,
+                                            trailingIcon = {
+                                                IconButton(
+                                                    onClick = {
+                                                        vm.attachment = null
+                                                    },
+                                                    modifier = Modifier.size(48.dp),
+                                                ) { Icon(Icons.Outlined.Close, "Remove attachment") }
+                                            },
+                                            modifier = Modifier.padding(start = 8.dp),
+                                        )
+                                    }
+                                    TextField(
+                                        value = draft,
+                                        onValueChange = { draft = it },
+                                        placeholder = { Text("Message Hydra", color = cs.onSurfaceVariant) },
+                                        modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp, max = 176.dp),
+                                        enabled = !vm.busy,
+                                        colors =
+                                            TextFieldDefaults.colors(
+                                                focusedContainerColor = cs.surfaceContainer,
+                                                unfocusedContainerColor = cs.surfaceContainer,
+                                                disabledContainerColor = cs.surfaceContainer,
+                                                focusedIndicatorColor = androidx.compose.ui.graphics.Color.Transparent,
+                                                unfocusedIndicatorColor = androidx.compose.ui.graphics.Color.Transparent,
+                                                disabledIndicatorColor = androidx.compose.ui.graphics.Color.Transparent,
+                                            ),
+                                        textStyle = MaterialTheme.typography.bodyLarge,
+                                    )
+                                    Row(
+                                        Modifier.fillMaxWidth(),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                    ) {
+                                        IconButton(onClick = {
+                                            picker.launch(
+                                                arrayOf(
+                                                    "text/*",
+                                                    "application/json",
+                                                    "application/javascript",
+                                                    "application/xml",
+                                                    "application/octet-stream",
                                                 ),
-                                        ) { Icon(Icons.Outlined.Close, "Remove attachment") }
-                                    },
-                                    modifier = Modifier.padding(start = 8.dp),
-                                )
-                            }
-                            TextField(
-                                value = draft,
-                                onValueChange = { draft = it },
-                                placeholder = { Text("Message Hydra", color = cs.onSurfaceVariant) },
-                                modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp, max = 176.dp),
-                                enabled = !vm.busy,
-                                colors =
-                                    TextFieldDefaults.colors(
-                                        focusedContainerColor = cs.surfaceContainer,
-                                        unfocusedContainerColor = cs.surfaceContainer,
-                                        disabledContainerColor = cs.surfaceContainer,
-                                        focusedIndicatorColor = androidx.compose.ui.graphics.Color.Transparent,
-                                        unfocusedIndicatorColor = androidx.compose.ui.graphics.Color.Transparent,
-                                        disabledIndicatorColor = androidx.compose.ui.graphics.Color.Transparent,
-                                    ),
-                                textStyle = MaterialTheme.typography.bodyLarge,
-                            )
-                            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                                IconButton(onClick = {
-                                    picker.launch(
-                                        arrayOf(
-                                            "text/*",
-                                            "application/json",
-                                            "application/javascript",
-                                            "application/xml",
-                                            "application/octet-stream",
-                                        ),
-                                    )
-                                }, enabled = !vm.busy) {
-                                    Icon(Icons.Outlined.Add, "Attach a text or code file", tint = cs.onSurfaceVariant)
-                                }
-                                Box(Modifier.weight(1f)) { ComposerModelControl(vm) { showModels = true } }
-                                FilledIconButton(
-                                    onClick = {
-                                        if (vm.busy) {
-                                            vm.stop()
-                                        } else if (vm.send(draft)) {
-                                            draft = ""
+                                            )
+                                        }, enabled = !vm.busy) {
+                                            Icon(
+                                                Icons.Outlined.Add,
+                                                "Attach a text or code file",
+                                                tint = cs.onSurfaceVariant,
+                                            )
                                         }
-                                    },
-                                    enabled =
-                                        vm.busy || draft.isNotBlank(),
-                                    modifier = Modifier.size(48.dp),
-                                    shape = CircleShape,
-                                ) {
-                                    Icon(
-                                        if (vm.busy) Icons.Outlined.Stop else Icons.Outlined.ArrowUpward,
-                                        if (vm.busy) "Stop response" else "Send message",
-                                    )
+                                        Box(Modifier.weight(1f)) { ComposerModelControl(vm) { showModels = true } }
+                                        FilledIconButton(
+                                            onClick = {
+                                                if (vm.busy) {
+                                                    vm.stop()
+                                                } else if (vm.send(draft)) {
+                                                    draft = ""
+                                                }
+                                            },
+                                            enabled = vm.busy || draft.isNotBlank(),
+                                            modifier = Modifier.size(48.dp),
+                                            shape = CircleShape,
+                                        ) {
+                                            Icon(
+                                                if (vm.busy) Icons.Outlined.Stop else Icons.Outlined.ArrowUpward,
+                                                if (vm.busy) "Stop response" else "Send message",
+                                            )
+                                        }
+                                    }
                                 }
                             }
+                            Spacer(Modifier.height(8.dp))
                         }
                     }
-                    Spacer(Modifier.height(8.dp))
                 }
             },
         ) { padding ->
@@ -388,6 +393,7 @@ fun ChatScreen(vm: HydraModel) {
                     ChatWelcome(rememberChatWelcome()) { draft = it }
                 } else {
                     val clipboard = LocalClipboardManager.current
+                    val externalPrompt = LocalExternalIntentPrompt.current
                     ChatTimeline(
                         ChatTimelineUiState(
                             vm.activeId,
@@ -399,28 +405,20 @@ fun ChatScreen(vm: HydraModel) {
                             scope.launch { snackbar.showSnackbar("Response copied") }
                         },
                         onShare = { message ->
-                            val share =
-                                Intent(
-                                    Intent.ACTION_SEND,
-                                ).setType("text/plain").putExtra(Intent.EXTRA_TEXT, message.text)
-                            runCatching { context.startActivity(Intent.createChooser(share, "Share response")) }
-                                .onFailure { scope.launch { snackbar.showSnackbar("Couldn’t open sharing.") } }
+                            shareText(context, externalPrompt, "Share response", message.text)
                         },
                         toolContent = {
                             message,
                             _,
                             _,
                             ->
-                            vm.steps.firstOrNull { it.id == message.id }?.let { WorkToolEntry(it, false) {} }
+                            vm.steps.firstOrNull { it.id == message.id }?.let {
+                                WorkToolEntry(listOf(it), null) { _, _ -> }
+                            }
                         },
                         trailingContent = {
                             if (vm.busy && vm.messages.lastOrNull()?.role == "tool") {
-                                Row(
-                                    Modifier.padding(vertical = 12.dp),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                ) {
-                                    CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
-                                    Spacer(Modifier.width(12.dp))
+                                BusyStatusRow(Modifier.padding(vertical = 12.dp), spacing = 12.dp) {
                                     ShimmerStatusText(
                                         "Working…",
                                         style = MaterialTheme.typography.bodyLarge,
@@ -437,10 +435,18 @@ fun ChatScreen(vm: HydraModel) {
                                 onRevert = { message -> vm.revert(message.id) },
                                 onRegenerate = { message -> vm.regenerate(message.id) },
                             ),
+                        searchOpen = searchOpen,
+                        onSearchOpenChange = { searchOpen = it },
+                        onViewQuiz = { message ->
+                            message.quiz?.let { QuizResultActivity.open(context, it) }
+                        },
                     )
                 }
             }
         }
+    }
+    if (showContext) {
+        ContextSheet(vm.contextUsage, { vm.setContextTokens(it) }) { showContext = false }
     }
     if (showConnection) ConnectionSheet(vm, onDismiss = { showConnection = false })
     if (showModels) {
@@ -452,43 +458,43 @@ fun ChatScreen(vm: HydraModel) {
     vm.pendingQuestions?.let { request ->
         AgentQuestionSheet(request, { vm.answerQuestions(request.id, it) }, { vm.answerQuestions(request.id, null) })
     }
+    vm.pendingQuiz?.let { quiz ->
+        AgentQuizSheet(
+            quiz,
+            onFinish = { attempt ->
+                vm.finishQuiz(quiz.id, attempt)
+                QuizResultActivity.open(context, attempt)
+            },
+            onCancel = { vm.cancelQuiz(quiz.id) },
+        )
+    }
     renameTarget?.let { target ->
-        AlertDialog(
-            onDismissRequest = { renameTarget = null },
-            title = { Text("Rename conversation") },
-            text = {
-                OutlinedTextField(
-                    value = renameTitle,
-                    onValueChange = { renameTitle = it },
-                    label = { Text("Conversation name") },
-                    singleLine = true,
-                    shape = MaterialTheme.shapes.medium,
-                )
+        RenameDialog(
+            title = "Rename conversation",
+            label = "Conversation name",
+            value = renameTitle,
+            onValueChange = { renameTitle = it },
+            confirmLabel = "Save",
+            onConfirm = {
+                vm.renameConversation(target.id, renameTitle)
+                renameTarget = null
             },
-            confirmButton = {
-                TextButton(enabled = renameTitle.isNotBlank(), onClick = {
-                    vm.renameConversation(target.id, renameTitle)
-                    renameTarget = null
-                }) { Text("Save") }
-            },
-            dismissButton = { TextButton(onClick = { renameTarget = null }) { Text("Cancel") } },
+            onDismiss = { renameTarget = null },
         )
     }
     deleteTarget?.let { target ->
-        AlertDialog(
-            onDismissRequest = { deleteTarget = null },
-            title = { Text("Delete conversation?") },
-            text = { Text("“${target.title}” and its messages will be removed from this device.") },
-            confirmButton = {
-                TextButton(onClick = {
-                    if (vm.activeId == target.id) {
-                        draft = ""
-                    }
-                    vm.deleteConversation(target.id)
-                    deleteTarget = null
-                }) { Text("Delete") }
+        ConfirmDialog(
+            title = "Delete conversation?",
+            body = "“${target.title}” and its messages will be removed from this device.",
+            confirmLabel = "Delete",
+            onConfirm = {
+                if (vm.activeId == target.id) {
+                    draft = ""
+                }
+                vm.deleteConversation(target.id)
+                deleteTarget = null
             },
-            dismissButton = { TextButton(onClick = { deleteTarget = null }) { Text("Cancel") } },
+            onDismiss = { deleteTarget = null },
         )
     }
 }

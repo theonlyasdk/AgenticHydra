@@ -3,11 +3,7 @@ package app.agentichydra
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
-import okhttp3.HttpUrl.Companion.toHttpUrl
-import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
-import okhttp3.Request
-import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.IOException
@@ -44,13 +40,7 @@ class ConnectionValidator {
     ): ModelSpec =
         withContext(Dispatchers.IO) {
             try {
-                val root = base.trim().trimEnd('/').toHttpUrl()
-                require(
-                    root.username.isEmpty() && root.password.isEmpty() && root.query == null && root.fragment == null,
-                ) {
-                    "Use a base URL without credentials or query parameters."
-                }
-                require(key.isBlank() || root.isHttps) { "Use HTTPS when sending an API key." }
+                val root = validatedBaseUrl(base, key)
                 require(!provider.keyRequired || key.isNotBlank()) { "Enter your ${provider.label} API key." }
                 // Fall back to the provider's documented default when the user hasn't
                 // entered a model id, so a cold catalog endpoint can't block the test.
@@ -97,13 +87,7 @@ class ConnectionValidator {
                         .put("stream", false)
                         .put("max_tokens", 4)
                         .put("messages", JSONArray().put(JSONObject().put("role", "user").put("content", "Reply OK.")))
-                val request =
-                    Request
-                        .Builder()
-                        .url(root.toString().trimEnd('/') + "/chat/completions")
-                        .post(payload.toString().toRequestBody("application/json".toMediaType()))
-                        .apply { if (key.isNotBlank()) header("Authorization", "Bearer ${key.trim()}") }
-                        .build()
+                val request = chatCompletionRequest(root.toString(), payload, key)
                 client.newCall(request).execute().use { response ->
                     if (!response.isSuccessful) {
                         throw IOException(

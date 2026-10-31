@@ -101,11 +101,7 @@ internal object ScheduleTools {
                     integerSchema("Total future runs, default one; recurring defaults to 10. Maximum 100.", 1, 100),
             )
         return listOf(
-            toolSchema(
-                "get_time",
-                "Read the device's current UTC/local time and time zone before interpreting dates.",
-                emptyList(),
-            ),
+            ResearchToolSchemas.getTime(),
             toolSchema(
                 "wait_for",
                 "Pause the current agent turn without blocking UI, then continue. Stop cancels the wait. At most five minutes; use schedule_task for longer delays. An active wait cannot survive process termination.",
@@ -299,6 +295,22 @@ internal class TaskSchedules(
         return record
     }
 
+    /** Replaces any queued work for this schedule once the edit no longer exceeds the cap. */
+    private fun reactivated(
+        old: ScheduledTask,
+        updated: ScheduledTask,
+    ): ScheduledTask {
+        require(
+            old.state == "Scheduled" || records.count {
+                it.state in setOf("Scheduled", "Running")
+            } < 24,
+        ) { "At most 24 schedules can be active." }
+        save(updated)
+        manager.cancelAllWorkByTag("schedule:${old.id}")
+        enqueue(updated)
+        return updated
+    }
+
     fun update(
         args: JSONObject,
         connection: WorkConnection,
@@ -328,15 +340,7 @@ internal class TaskSchedules(
                     error = "",
                 ),
             )
-        require(
-            old.state == "Scheduled" || records.count {
-                it.state in setOf("Scheduled", "Running")
-            } < 24,
-        ) { "At most 24 schedules can be active." }
-        save(updated)
-        manager.cancelAllWorkByTag("schedule:${old.id}")
-        enqueue(updated)
-        return updated
+        return reactivated(old, updated)
     }
 
     fun cancel(id: String): ScheduledTask {
@@ -383,15 +387,7 @@ internal class TaskSchedules(
                     error = "",
                 ),
             )
-        require(
-            old.state == "Scheduled" || records.count {
-                it.state in setOf("Scheduled", "Running")
-            } < 24,
-        ) { "At most 24 schedules can be active." }
-        save(updated)
-        manager.cancelAllWorkByTag("schedule:${old.id}")
-        enqueue(updated)
-        return updated
+        return reactivated(old, updated)
     }
 
     fun mark(

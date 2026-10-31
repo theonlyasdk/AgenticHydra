@@ -1,21 +1,12 @@
 package app.agentichydra
 
-import android.Manifest
 import android.content.Intent
-import android.net.Uri
 import android.os.Build
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
+import app.agentichydra.mcp.McpStatus
 import androidx.compose.foundation.*
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.outlined.ManageSearch
-import androidx.compose.material.icons.automirrored.outlined.OpenInNew
 import androidx.compose.material.icons.outlined.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -25,28 +16,38 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.font.FontFamily
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.lifecycle.viewmodel.compose.viewModel
 
 @Composable
 fun HydraApp() {
-    val application = LocalContext.current.applicationContext as HydraApplication
+    val context = LocalContext.current
+    val application = context.applicationContext as HydraApplication
     val chat = application.models[HydraModel::class.java]
     val work = application.models[WorkModel::class.java]
     var destination by rememberSaveable { mutableStateOf("Chat") }
-    // Preserve the bar in composition so Material animates each selection change.
-    Scaffold(contentWindowInsets = WindowInsets(0), bottomBar = {
-        HydraNavigation(destination) { destination = it }
-    }) { padding ->
-        Box(Modifier.fillMaxSize().padding(padding).consumeWindowInsets(padding)) {
-            when (destination) {
-                "Work" -> WorkScreen(chat, work)
-                "User" -> UserScreen(chat, work)
-                else -> ChatScreen(chat)
+    val linkSheet = rememberLinkSheet()
+    val externalPrompt = rememberExternalIntentPrompt()
+    val openLink: (String) -> Unit = remember(context, linkSheet) {
+        { url -> openInLinkSheet(context, url, linkSheet, externalPrompt) }
+    }
+    CompositionLocalProvider(
+        LocalLinkOpener provides openLink,
+        LocalExternalIntentPrompt provides externalPrompt,
+    ) {
+        // Preserve the bar in composition so Material animates each selection change.
+        Scaffold(contentWindowInsets = WindowInsets(0), bottomBar = {
+            HydraNavigation(destination) { destination = it }
+        }) { padding ->
+            Box(Modifier.fillMaxSize().padding(padding).consumeWindowInsets(padding)) {
+                when (destination) {
+                    "Work" -> WorkScreen(chat, work)
+                    "User" -> UserScreen(chat, work)
+                    else -> ChatScreen(chat)
+                }
             }
         }
+        LinkSheet(linkSheet)
+        ExternalIntentHost(externalPrompt)
     }
 }
 
@@ -86,11 +87,7 @@ fun ApprovalSheet(
             Modifier.fillMaxWidth().padding(horizontal = 16.dp).padding(bottom = 24.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(Icons.Outlined.Shield, null, tint = cs.primary)
-                Spacer(Modifier.width(12.dp))
-                Text("Tool approvals", style = MaterialTheme.typography.titleLarge)
-            }
+            SheetHeader(Icons.Outlined.Shield, "Tool approvals")
             ToolApprovalOptions(ToolApprovalsUiState(work.mode, !work.running)) { mode ->
                 if (mode in setOf(ApprovalMode.SESSION, ApprovalMode.FULL)) {
                     confirm = mode
@@ -149,10 +146,26 @@ fun UserScreen(
 ) {
     val cs = MaterialTheme.colorScheme
     val context = LocalContext.current
+    val application = context.applicationContext as HydraApplication
+    val mcpStates by application.mcpRegistry.states.collectAsState()
+    val mcpSummary =
+        when {
+            mcpStates.isEmpty() -> "Set up"
+            else -> {
+                val connected = mcpStates.values.count { it.status == McpStatus.CONNECTED }
+                if (connected > 0) {
+                    "$connected connected"
+                } else {
+                    "${mcpStates.size} server${if (mcpStates.size == 1) "" else "s"}"
+                }
+            }
+        }
     val appearanceState = rememberAppearanceState()
+    val confirmExternal = rememberConfirmExternalIntents()
     var appearance by rememberSaveable { mutableStateOf(false) }
     var connections by rememberSaveable { mutableStateOf(false) }
     var approvals by rememberSaveable { mutableStateOf(false) }
+    var externalLinks by rememberSaveable { mutableStateOf(false) }
     val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
     var allowed by remember { mutableStateOf(TermuxBridge.allowed(context)) }
     DisposableEffect(lifecycleOwner) {
@@ -205,13 +218,39 @@ fun UserScreen(
                         connections = true
                     }
                     GroupDivider()
+                    val advanced = rememberAdvancedModelSettings()
+                    SettingsEntry(
+                        Icons.Outlined.Tune,
+                        "Provider settings",
+                        when {
+                            advanced.preventRateLimits && advanced.resumeOnRateLimit -> "Auto"
+                            advanced.preventRateLimits -> "Paced"
+                            advanced.resumeOnRateLimit -> "Resume"
+                            else -> "Off"
+                        },
+                    ) {
+                        context.startActivity(Intent(context, AdvancedModelActivity::class.java))
+                    }
+                    GroupDivider()
                     SettingsEntry(
                         Icons.Outlined.Terminal,
                         "Termux",
                         if (allowed) "Connected" else "Set up",
                     ) { page("termux") }
                     GroupDivider()
+                    SettingsEntry(
+                        Icons.Outlined.Hub,
+                        "MCP servers",
+                        mcpSummary,
+                    ) { page("mcp") }
+                    GroupDivider()
                     SettingsEntry(Icons.Outlined.Shield, "Tool approvals", work.mode.title) { approvals = true }
+                    GroupDivider()
+                    SettingsEntry(
+                        Icons.Outlined.Build,
+                        "Tool settings",
+                        if (confirmExternal) "Ask first" else "Open directly",
+                    ) { externalLinks = true }
                 }
             }
             item {
@@ -226,7 +265,7 @@ fun UserScreen(
                     GroupDivider()
                     SettingsEntry(Icons.Outlined.Storage, "Storage", null) { page("storage") }
                     GroupDivider()
-                    SettingsEntry(Icons.Outlined.Info, "Version", "1.2.0") { page("about") }
+                    SettingsEntry(Icons.Outlined.Info, "Version", "1.3.0") { page("about") }
                 }
             }
         }
@@ -242,11 +281,7 @@ fun UserScreen(
                     .padding(bottom = 24.dp),
                 verticalArrangement = Arrangement.spacedBy(24.dp),
             ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(Icons.Outlined.Contrast, null, tint = cs.primary)
-                    Spacer(Modifier.width(12.dp))
-                    Text("Appearance", style = MaterialTheme.typography.titleLarge)
-                }
+                SheetHeader(Icons.Outlined.Contrast, "Appearance")
                 AppearanceOptions(
                     appearanceState,
                     Build.VERSION.SDK_INT >= 31,
@@ -254,12 +289,17 @@ fun UserScreen(
                     onDynamicColorChange = { prefs.edit().putBoolean("dynamic", it).apply() },
                     onMarqueeChange = { prefs.edit().putBoolean("marquee", it).apply() },
                     onHydraTitleChange = { prefs.edit().putBoolean("show_hydra_title", it).apply() },
+                    onRelativeTimeChange = { prefs.edit().putBoolean("relative_time", it).apply() },
+                    onThinkingChange = { prefs.edit().putString("thinking_animation", it.name).apply() },
+                    onResponseFadeChange = { prefs.edit().putBoolean("response_fade", it).apply() },
+                    onFadeMillisChange = { prefs.edit().putInt("fade_millis", it).apply() },
                 )
             }
         }
     }
     if (connections) ConnectionSheet(chat) { connections = false }
     if (approvals) ApprovalSheet(work) { approvals = false }
+    if (externalLinks) ToolSettingsSheet { externalLinks = false }
 }
 
 @Composable

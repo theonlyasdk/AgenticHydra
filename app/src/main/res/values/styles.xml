@@ -1,10 +1,35 @@
 <resources>
+
     <style name="AppTheme" parent="android:style/Theme.Material.Light.NoActionBar">
         <item name="android:fontFamily">sans</item>
         <item name="android:windowLightStatusBar">@bool/hydra_light_system_bars</item>
         <item name="android:windowActionModeOverlay">true</item>
         <item name="android:windowBackground">@color/hydra_window_background</item>
+        <item name="android:windowAnimationStyle">@style/HydraActivityTransition</item>
     </style>
+
+    <!--
+      Fixed appearance themes for a forced light/dark app mode. The night resources only
+      describe the system, so an app forced to light on a dark system would otherwise keep
+      the white system icons and lose the status bar against its own light background.
+    -->
+    <style name="AppThemeLight" parent="AppTheme">
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:windowBackground">@color/hydra_window_background_light</item>
+    </style>
+
+    <style name="AppThemeDark" parent="AppTheme">
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowBackground">@color/hydra_window_background_dark</item>
+    </style>
+
+    <style name="HydraActivityTransition">
+        <item name="android:activityOpenEnterAnimation">@anim/hydra_activity_open_enter</item>
+        <item name="android:activityOpenExitAnimation">@anim/hydra_activity_open_exit</item>
+        <item name="android:activityCloseEnterAnimation">@anim/hydra_activity_close_enter</item>
+        <item name="android:activityCloseExitAnimation">@anim/hydra_activity_close_exit</item>
+    </style>
+
     <style name="HydraStarting" parent="Theme.SplashScreen">
         <item name="windowSplashScreenBackground">@color/hydra_icon_background</item>
         <item name="windowSplashScreenAnimatedIcon">@drawable/hydra_splash</item>
@@ -12,14 +37,19 @@
         <item name="android:colorAccent">@color/hydra_icon_foreground</item>
         <item name="android:windowLightStatusBar">@bool/hydra_light_system_bars</item>
     </style>
+
     <style name="HydraStartingLight" parent="HydraStarting">
         <item name="windowSplashScreenBackground">@color/hydra_icon_background_light</item>
         <item name="android:colorAccent">@color/hydra_icon_foreground_light</item>
         <item name="android:windowLightStatusBar">true</item>
+        <item name="postSplashScreenTheme">@style/AppThemeLight</item>
     </style>
+
     <style name="HydraStartingDark" parent="HydraStarting">
         <item name="windowSplashScreenBackground">@color/hydra_icon_background_dark</item>
         <item name="android:colorAccent">@color/hydra_icon_foreground_dark</item>
         <item name="android:windowLightStatusBar">false</item>
+        <item name="postSplashScreenTheme">@style/AppThemeDark</item>
     </style>
+
 </resources>

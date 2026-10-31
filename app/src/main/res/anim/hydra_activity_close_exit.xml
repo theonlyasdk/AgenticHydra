@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The closing screen slides out to the right while the previous one returns from its offset. -->
+<translate xmlns:android="http://schemas.android.com/apk/res/android"
+    android:duration="340"
+    android:fromXDelta="0%p"
+    android:interpolator="@android:interpolator/decelerate_quint"
+    android:toXDelta="100%p"
+    android:zAdjustment="top" />

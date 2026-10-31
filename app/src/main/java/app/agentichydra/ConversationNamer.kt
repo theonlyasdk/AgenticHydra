@@ -1,18 +1,15 @@
 package app.agentichydra
 
-import kotlinx.coroutines.suspendCancellableCoroutine
-import okhttp3.*
-import okhttp3.MediaType.Companion.toMediaType
-import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.OkHttpClient
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.IOException
 import java.util.concurrent.TimeUnit
-import kotlin.coroutines.resume
-import kotlin.coroutines.resumeWithException
+
+private const val REASONING_CLOSE_TAG = "<" + "/think>"
 
 /** A small, independent request; naming never owns or blocks the response stream. */
-class ConversationNamer(
+internal class ConversationNamer(
     client: OkHttpClient,
 ) {
     private val client = client.newBuilder().callTimeout(30, TimeUnit.SECONDS).build()
@@ -24,7 +21,11 @@ class ConversationNamer(
         prompt: String,
         answer: String,
         reasoning: ReasoningProfile = ReasoningProfile(emptyList()),
+        provider: Provider? = null,
+        rateLimit: RateLimitPolicy = RateLimitPolicy(),
     ): String {
+        // Naming is a real provider request: it waits behind the same budget as the answer.
+        if (rateLimit.prevent && provider != null) RequestPacer.acquire(provider, rateLimit.rpm)
         val messages =
             JSONArray()
                 .put(
@@ -50,43 +51,16 @@ class ConversationNamer(
                 .put("stream", false)
                 .put("max_tokens", if (reasoning.available) 512 else 64)
         ReasoningPolicy.apply(payload, reasoning, reasoning.levels.firstOrNull() ?: "auto")
-        val request =
-            Request
-                .Builder()
-                .url("${endpoint.trimEnd('/')}/chat/completions")
-                .post(payload.toString().toRequestBody("application/json".toMediaType()))
-                .apply { if (key.isNotBlank()) header("Authorization", "Bearer $key") }
-                .build()
         val body =
-            suspendCancellableCoroutine<String> { continuation ->
-                val call = client.newCall(request)
-                continuation.invokeOnCancellation { call.cancel() }
-                call.enqueue(
-                    object : Callback {
-                        override fun onFailure(
-                            call: Call,
-                            e: IOException,
-                        ) {
-                            continuation.resumeWithException(e)
-                        }
-
-                        override fun onResponse(
-                            call: Call,
-                            response: Response,
-                        ) {
-                            try {
-                                response.use {
-                                    if (!it.isSuccessful) throw IOException("Conversation naming unavailable")
-                                    continuation.resume(it.body?.string().orEmpty())
-                                }
-                            } catch (e: Exception) {
-                                continuation.resumeWithException(e)
-                            }
-                        }
-                    },
-                )
+            client.awaitResponse(chatCompletionRequest(endpoint, payload, key)) { response ->
+                if (response.code == 429 && provider != null) {
+                    // Naming draws on the same provider budget, so share the block it earns.
+                    RequestPacer.noteRateLimited(provider, response.rateLimitWaitMillis(provider))
+                }
+                if (!response.isSuccessful) throw IOException("Conversation naming unavailable")
+                response.body?.string().orEmpty()
             }
-        val message = JSONObject(body).getJSONArray("choices").getJSONObject(0).getJSONObject("message")
+        val message = JSONObject(body).assistantMessage()
         val content = if (message.isNull("content")) "" else message.getString("content")
         return cleanConversationTitle(content)
     }
@@ -94,7 +68,7 @@ class ConversationNamer(
 
 internal fun cleanConversationTitle(content: String): String =
     content
-        .substringAfterLast("</think>")
+        .substringAfterLast(REASONING_CLOSE_TAG)
         .trim()
         .lineSequence()
         .firstOrNull { it.isNotBlank() }

@@ -60,12 +60,22 @@ dependencies {
     // WorkManager 2.10 supports this project's compileSdk 35 toolchain.
     //noinspection GradleDependency
     implementation("androidx.work:work-runtime-ktx:2.10.1")
+    // MCP OAuth (Custom Tabs) + SSE transport
+    implementation("androidx.browser:browser:1.8.0")
+    implementation("com.squareup.okhttp3:okhttp-sse:4.12.0")
     implementation("io.github.rosemoe:editor:0.23.7")
     implementation("io.github.rosemoe:language-textmate:0.23.7")
     implementation("io.noties.markwon:core:4.6.2")
     implementation("io.noties.markwon:ext-tables:4.6.2")
     implementation("io.noties.markwon:ext-strikethrough:4.6.2")
     implementation("io.noties.markwon:ext-tasklist:4.6.2")
+    // Settings transfer over QR: zxing encodes and decodes the frames, CameraX feeds the scanner.
+    implementation("com.google.zxing:core:3.5.3")
+    val cameraX = "1.4.2"
+    implementation("androidx.camera:camera-core:$cameraX")
+    implementation("androidx.camera:camera-camera2:$cameraX")
+    implementation("androidx.camera:camera-lifecycle:$cameraX")
+    implementation("androidx.camera:camera-view:$cameraX")
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.json:json:20240303")
     testImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")

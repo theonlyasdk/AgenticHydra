@@ -1,4 +1,5 @@
 <data-extraction-rules>
+
     <cloud-backup>
         <exclude domain="root" path="." />
         <exclude domain="file" path="." />
@@ -6,6 +7,7 @@
         <exclude domain="sharedpref" path="." />
         <exclude domain="external" path="." />
     </cloud-backup>
+
     <device-transfer>
         <exclude domain="root" path="." />
         <exclude domain="file" path="." />
@@ -13,4 +15,5 @@
         <exclude domain="sharedpref" path="." />
         <exclude domain="external" path="." />
     </device-transfer>
+
 </data-extraction-rules>

@@ -2,6 +2,14 @@ package app.agentichydra
 
 import android.content.res.Configuration
 import androidx.activity.ComponentActivity
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -33,6 +41,7 @@ data class ChatStarter(
 data class ChatWelcomeUiState(
     val greeting: String,
     val suggestions: List<ChatStarter>,
+    val suggestionIndex: Int = 0,
 )
 
 private val starterSets =
@@ -164,9 +173,11 @@ fun chatWelcomeAt(now: LocalDateTime): ChatWelcomeUiState {
             }
         }
     val day = now.toLocalDate().toEpochDay()
+    val suggestionIndex = Math.floorMod(day, starterSets.size.toLong()).toInt()
     return ChatWelcomeUiState(
         greetings[Math.floorMod(day, greetings.size.toLong()).toInt()],
-        starterSets[Math.floorMod(day, starterSets.size.toLong()).toInt()],
+        starterSets[suggestionIndex],
+        suggestionIndex,
     )
 }
 
@@ -202,6 +213,14 @@ fun ChatWelcome(
     state: ChatWelcomeUiState,
     onChoose: (String) -> Unit,
 ) {
+    val cs = MaterialTheme.colorScheme
+    var rotation by remember(state.suggestionIndex) { mutableIntStateOf(0) }
+    val suggestions =
+        if (rotation == 0) {
+            state.suggestions
+        } else {
+            starterSets[(state.suggestionIndex + rotation) % starterSets.size]
+        }
     Column(
         Modifier
             .widthIn(
@@ -213,7 +232,11 @@ fun ChatWelcome(
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center,
     ) {
-        HydraIllustration(Modifier.size(112.dp))
+        HydraIllustration(
+            Modifier.size(112.dp),
+            onClick = { rotation = (rotation + 1) % starterSets.size },
+            onClickLabel = "Show different suggestions",
+        )
         Spacer(Modifier.height(20.dp))
         Text(
             state.greeting,
@@ -222,7 +245,24 @@ fun ChatWelcome(
             modifier = Modifier.fillMaxWidth(),
         )
         Spacer(Modifier.height(28.dp))
-        state.suggestions.forEach { Starter(it.icon, it.title, it.prompt, onChoose) }
+        AnimatedContent(
+            targetState = suggestions,
+            transitionSpec = {
+                (slideInVertically(
+                    spring(dampingRatio = Spring.DampingRatioNoBouncy, stiffness = Spring.StiffnessMediumLow),
+                ) { it / 3 } + fadeIn()).togetherWith(
+                    slideOutVertically(
+                        spring(dampingRatio = Spring.DampingRatioNoBouncy, stiffness = Spring.StiffnessMediumLow),
+                    ) { -it / 3 } + fadeOut(),
+                )
+            },
+            label = "Suggestion rotation",
+            modifier = Modifier.fillMaxWidth().verticalFadingEdges(cs.background),
+        ) { starters ->
+            Column(Modifier.fillMaxWidth()) {
+                starters.forEach { Starter(it.icon, it.title, it.prompt, onChoose) }
+            }
+        }
         Spacer(Modifier.height(24.dp))
     }
 }

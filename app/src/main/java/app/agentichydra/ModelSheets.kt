@@ -7,10 +7,8 @@ import androidx.compose.animation.core.LinearOutSlowInEasing
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
-import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
-import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.togetherWith
@@ -19,12 +17,8 @@ import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.CornerSize
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ManageSearch
@@ -45,11 +39,9 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.AnnotatedString
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
@@ -182,13 +174,11 @@ fun ModelPickerSheet(
     HydraBottomSheet(onDismiss = {
         if (connectionsAfterDismiss) onConnections() else onDismiss()
     }, containerColor = cs.surfaceContainerLow, lock = true, heading = { close ->
-        Row(
+        SheetHeader(
+            Icons.Outlined.AutoAwesome,
+            "Models",
             Modifier.fillMaxWidth().padding(horizontal = 16.dp).testTag("models-header"),
-            verticalAlignment = Alignment.CenterVertically,
         ) {
-            Icon(Icons.Outlined.AutoAwesome, null, tint = cs.primary)
-            Spacer(Modifier.width(12.dp))
-            Text("Models", style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f))
             IconButton(onClick = {
                 vm.refreshModels(draftProvider)
             }, enabled = !vm.discovering && !availability.needsConnection) {
@@ -739,14 +729,11 @@ fun ConnectionSheet(
     val cs = MaterialTheme.colorScheme
     HydraBottomSheet(onDismiss = onDismiss, containerColor = cs.surfaceContainerLow) { dismiss ->
         Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).imePadding()) {
-            Row(
+            SheetHeader(
+                Icons.Outlined.Hub,
+                "Connections",
                 Modifier.fillMaxWidth().padding(horizontal = 16.dp).testTag("connections-header"),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Icon(Icons.Outlined.Hub, null, tint = cs.primary)
-                Spacer(Modifier.width(12.dp))
-                Text("Connections", style = MaterialTheme.typography.titleLarge)
-            }
+            )
             Column(
                 Modifier.fillMaxWidth().padding(horizontal = 24.dp).padding(top = 16.dp, bottom = 24.dp),
                 verticalArrangement = Arrangement.spacedBy(16.dp),

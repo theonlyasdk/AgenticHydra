@@ -221,3 +221,35 @@ internal fun toolSchema(
                 .put("required", JSONArray(required)),
         ),
     )
+
+/** Answers a pending wizard, or rejects a reply that does not match the questions it was asked. */
+internal fun resolveQuestionAnswers(
+    request: AgentQuestionRequest,
+    answers: String?,
+): String {
+    if (answers == null) {
+        return JSONObject()
+            .put("status", "cancelled")
+            .put(
+                "instruction",
+                "The user dismissed these questions. Do not repeat them without new instructions.",
+            ).toString()
+    }
+    val response = JSONObject(answers)
+    require(
+        response.getString("status") == "answered" &&
+            response.getJSONArray("answers").length() == request.questions.size,
+    ) { "Invalid question response." }
+    val values = response.getJSONArray("answers")
+    require(
+        answers.length <= MAX_QUESTION_ANSWERS &&
+            (0 until values.length()).all { index ->
+                val value = values.getJSONObject(index)
+                val question = request.questions[index]
+                value.getString("id") == question.id && QuestionTool.valid(question, value)
+            },
+    ) { "Question answers did not match the request." }
+    return answers
+}
+
+private const val MAX_QUESTION_ANSWERS = 15000

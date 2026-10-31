@@ -1,11 +1,24 @@
 package app.agentichydra
 
+import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
 import okhttp3.Request
-import org.json.JSONArray
 import org.json.JSONObject
 import java.io.IOException
+
+/** Rejects base URLs that would leak or confuse credentials before any request is built. */
+internal fun validatedBaseUrl(
+    base: String,
+    credential: String,
+): HttpUrl {
+    val root = base.trim().trimEnd('/').toHttpUrl()
+    require(root.username.isEmpty() && root.password.isEmpty() && root.query == null && root.fragment == null) {
+        "Use a base URL without credentials or query parameters."
+    }
+    require(credential.isBlank() || root.isHttps) { "Use HTTPS when sending an API key." }
+    return root
+}
 
 data class ModelSpec(
     val id: String,
@@ -35,11 +48,7 @@ class ProviderCatalog(
         base: String,
         credential: String,
     ): List<ModelSpec> {
-        val root = base.trim().trimEnd('/').toHttpUrl()
-        require(credential.isBlank() || root.isHttps) { "Use HTTPS with an API key." }
-        require(root.username.isEmpty() && root.password.isEmpty() && root.query == null && root.fragment == null) {
-            "Use a base URL without credentials or query parameters."
-        }
+        val root = validatedBaseUrl(base, credential)
         val nativeGemini = provider == Provider.GEMINI && root.host == "generativelanguage.googleapis.com"
         val result = mutableListOf<ModelSpec>()
         var page = ""

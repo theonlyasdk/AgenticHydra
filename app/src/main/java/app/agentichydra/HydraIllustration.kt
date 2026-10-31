@@ -18,6 +18,11 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.onClick
+import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.delay
@@ -31,7 +36,11 @@ data class HydraOrbitUiState(
 )
 
 @Composable
-fun HydraIllustration(modifier: Modifier = Modifier) {
+fun HydraIllustration(
+    modifier: Modifier = Modifier,
+    onClick: (() -> Unit)? = null,
+    onClickLabel: String? = null,
+) {
     val loop = rememberInfiniteTransition(label = "Hydra orbit")
     val phase =
         loop.animateFloat(
@@ -48,27 +57,6 @@ fun HydraIllustration(modifier: Modifier = Modifier) {
             label = "Hydra pulse",
         )
     var state by remember { mutableStateOf(HydraOrbitUiState()) }
-    // Triple-tap easter egg: the illustration glows for a short moment.
-    var taps by remember { mutableIntStateOf(0) }
-    var glowing by remember { mutableStateOf(false) }
-    val glowScale by animateFloatAsState(
-        if (glowing) 1f else 0f,
-        spring(dampingRatio = Spring.DampingRatioNoBouncy, stiffness = Spring.StiffnessLow),
-        label = "Glow",
-    )
-    LaunchedEffect(taps) {
-        if (taps > 0) {
-            delay(600)
-            if (taps >= 3) glowing = true
-            taps = 0
-        }
-    }
-    LaunchedEffect(glowing) {
-        if (glowing) {
-            delay(1000)
-            glowing = false
-        }
-    }
     LaunchedEffect(Unit) {
         val random = Random(System.nanoTime())
         while (true) {
@@ -86,9 +74,24 @@ fun HydraIllustration(modifier: Modifier = Modifier) {
                 )
         }
     }
+    val currentOnClick by rememberUpdatedState(onClick)
+    val tapModifier =
+        Modifier
+            .pointerInput(Unit) {
+                detectTapGestures(onTap = { currentOnClick?.invoke() })
+            }.semantics {
+                onClickLabel?.let { label ->
+                    contentDescription = label
+                    role = Role.Button
+                    onClick(label = label) {
+                        currentOnClick?.invoke()
+                        true
+                    }
+                }
+            }
     HydraOrbitIllustration(state, {
         phase.value
-    }, { pulse.value }, modifier.pointerInput(Unit) { detectTapGestures(onTap = { taps++ }) }, glow = { glowScale })
+    }, { pulse.value }, modifier.then(tapModifier))
 }
 
 @Composable
@@ -97,9 +100,6 @@ fun HydraOrbitIllustration(
     phase: () -> Float,
     pulse: () -> Float,
     modifier: Modifier = Modifier,
-    glow: () -> Float = {
-        0f
-    },
 ) {
     HydraOrbitTheme {
         val cs = MaterialTheme.colorScheme
@@ -139,12 +139,7 @@ fun HydraOrbitIllustration(
                 val dot = dotSize * (1f + (pulse() - 1f) * 4f)
                 return dot + (sizes[index] - dot) * reveals[index].value
             }
-            Canvas(
-                Modifier.fillMaxSize().graphicsLayer {
-                    scaleX = 1f + glow() * 0.08f
-                    scaleY = 1f + glow() * 0.08f
-                },
-            ) {
+            Canvas(Modifier.fillMaxSize()) {
                 drawCircle(
                     Brush.radialGradient(
                         listOf(cs.primaryContainer, Color.Transparent),
@@ -154,13 +149,11 @@ fun HydraOrbitIllustration(
                     radius =
                         size.minDimension * .48f * pulse(),
                 )
-                drawCircle(cs.primary, radius = size.minDimension * .62f * (glow() + .38f), alpha = .4f * glow())
                 drawCircle(cs.outlineVariant, radius = size.minDimension * .38f, style = Stroke(1.dp.toPx()))
             }
             HydraMark(
                 Modifier.fillMaxSize(.42f).graphicsLayer {
-                    val g = glow()
-                    val s = pulse() + (g * .04f)
+                    val s = pulse()
                     scaleX = s
                     scaleY = s
                 },

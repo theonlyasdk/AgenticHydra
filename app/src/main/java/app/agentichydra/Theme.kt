@@ -2,8 +2,11 @@ package app.agentichydra
 
 import android.app.Activity
 import android.content.Context
+import android.content.ContextWrapper
 import android.content.SharedPreferences
+import android.content.res.Configuration
 import android.os.Build
+import android.view.ViewTreeObserver
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -27,18 +30,75 @@ enum class AppThemeMode(
     DARK("Dark"),
 }
 
+/** How the agent's thinking row is drawn: the Material 3 morphing blob or a classic spinner. */
+enum class ThinkingAnimation(
+    val label: String,
+    val detail: String,
+) {
+    BLOB("Loading blob", "Material 3 morphing shape"),
+    SPINNER("Circular spinner", "Classic indeterminate ring"),
+}
+
 data class AppearanceUiState(
     val themeMode: AppThemeMode = AppThemeMode.SYSTEM,
     val dynamicColor: Boolean = false,
     val marquee: Boolean = true,
     val showHydraTitle: Boolean = true,
+    val relativeTime: Boolean = false,
+    val thinking: ThinkingAnimation = ThinkingAnimation.SPINNER,
+    val responseFade: Boolean = true,
+    val fadeMillis: Int = DEFAULT_FADE_MILLIS,
 )
+
+/** Shortest and longest streaming fade the appearance slider offers, in milliseconds. */
+const val MIN_FADE_MILLIS = 40
+const val MAX_FADE_MILLIS = 1500
+const val DEFAULT_FADE_MILLIS = 160
 
 /** True when overflowing titles may auto-scroll; provided by [HydraTheme]. */
 val LocalMarqueeEnabled = staticCompositionLocalOf { true }
 
+/** True when task lists show relative timestamps ("5m ago") instead of clock dates; provided by [HydraTheme]. */
+val LocalRelativeTimeEnabled = staticCompositionLocalOf { false }
+
 /** True when the "Hydra" title should appear on the final summary message; provided by [HydraTheme]. */
 val LocalHydraTitleVisible = staticCompositionLocalOf { true }
+
+/** Thinking-row animation chosen in Appearance; provided by [HydraTheme]. */
+val LocalThinkingAnimation = staticCompositionLocalOf { ThinkingAnimation.SPINNER }
+
+/** True when newly streamed tokens fade in; provided by [HydraTheme]. */
+val LocalResponseFade = staticCompositionLocalOf { true }
+
+/** Length of the streaming token fade, in milliseconds; provided by [HydraTheme]. */
+val LocalResponseFadeMillis = staticCompositionLocalOf { DEFAULT_FADE_MILLIS }
+
+/** True when the app itself is dark, whether or not a composition is running. */
+internal fun isAppDarkTheme(context: Context): Boolean =
+    when (
+        runCatching {
+            AppThemeMode.valueOf(
+                context.getSharedPreferences("appearance", Context.MODE_PRIVATE)
+                    .getString("mode", "SYSTEM") ?: "SYSTEM",
+            )
+        }.getOrDefault(AppThemeMode.SYSTEM)
+    ) {
+        AppThemeMode.SYSTEM ->
+            (context.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) ==
+                Configuration.UI_MODE_NIGHT_YES
+        AppThemeMode.LIGHT -> false
+        AppThemeMode.DARK -> true
+    }
+
+/** Walks out of the context wrappers Compose may install to find the window owner. */
+private fun Context.findActivity(): Activity? {
+    var current: Context? = this
+    while (current is ContextWrapper) {
+        if (current is Activity) return current
+        current = current.baseContext
+    }
+    return current as? Activity
+}
 
 @Composable
 fun rememberAppearanceState(): AppearanceUiState {
@@ -54,6 +114,14 @@ fun rememberAppearanceState(): AppearanceUiState {
             prefs.getBoolean("dynamic", false),
             prefs.getBoolean("marquee", true),
             prefs.getBoolean("show_hydra_title", true),
+            prefs.getBoolean("relative_time", false),
+            runCatching {
+                ThinkingAnimation.valueOf(
+                    prefs.getString("thinking_animation", "SPINNER") ?: "SPINNER",
+                )
+            }.getOrDefault(ThinkingAnimation.SPINNER),
+            prefs.getBoolean("response_fade", true),
+            prefs.getInt("fade_millis", DEFAULT_FADE_MILLIS).coerceIn(MIN_FADE_MILLIS, MAX_FADE_MILLIS),
         )
     var state by remember(prefs) { mutableStateOf(read()) }
     val listener =
@@ -79,6 +147,14 @@ val Typography.hydraTitle: TextStyle get() =
         letterSpacing = (-1).sp,
     )
 
+/** Headline for grouped list rows; sits between body and title scale. */
+val Typography.workListTitle: TextStyle get() =
+    titleMedium.copy(
+        fontSize = 18.sp,
+        lineHeight = 24.sp,
+        fontWeight = FontWeight.SemiBold,
+    )
+
 /** Semantic success colors for completed actions and added diff lines. */
 val ColorScheme.success: Color get() = if (background.luminance() < .5f) Color(0xFF7ADFA0) else Color(0xFF1E7B45)
 val ColorScheme.successContainer: Color get() =
@@ -93,6 +169,36 @@ val ColorScheme.onSuccessContainer: Color get() =
     } else {
         Color(0xFF0B4A29)
     }
+
+/** Muted status accents: pale on dark surfaces, deeper and calmer on light surfaces. */
+val ColorScheme.statusComplete: Color get() =
+    if (background.luminance() < .5f) {
+        Color(0xFFA8D5BA)
+    } else {
+        Color(0xFF2F6B46)
+    }
+val ColorScheme.statusInterrupted: Color get() =
+    if (background.luminance() < .5f) {
+        Color(0xFFE8C99B)
+    } else {
+        Color(0xFF7A5A12)
+    }
+val ColorScheme.statusFailed: Color get() =
+    if (background.luminance() < .5f) {
+        Color(0xFFE8B4B8)
+    } else {
+        Color(0xFFA33A35)
+    }
+
+/** Maps a finished work-task status to its semantic accent; other states stay neutral. */
+fun ColorScheme.workStatusColor(status: String): Color =
+    when (status) {
+        "Complete" -> statusComplete
+        "Failed" -> statusFailed
+        "Interrupted", "Cancelled", "Stopped", "Step limit reached" -> statusInterrupted
+        else -> onSurfaceVariant
+    }
+
 val Typography.markdownHeadings: List<TextStyle> get() =
     listOf(
         headlineMedium,
@@ -250,18 +356,37 @@ fun HydraTheme(
         }
     val view = LocalView.current
     if (!view.isInEditMode) {
-        SideEffect {
-            (context as? Activity)?.window?.let { window ->
-                WindowCompat.getInsetsController(window, view).apply {
-                    isAppearanceLightStatusBars = !dark
-                    isAppearanceLightNavigationBars = !dark
+        val activity = context.findActivity()
+        DisposableEffect(view, activity, dark) {
+            val window = activity?.window
+            if (window == null) {
+                onDispose {}
+            } else {
+                val controller = WindowCompat.getInsetsController(window, view)
+                fun applyAppearance() {
+                    controller.isAppearanceLightStatusBars = !dark
+                    controller.isAppearanceLightNavigationBars = !dark
                 }
+                applyAppearance()
+                // A window that gains focus re-applies the appearance from its theme, which
+                // follows the system night mode. Re-assert the in-app choice after attach.
+                view.post { applyAppearance() }
+                val focusListener =
+                    ViewTreeObserver.OnWindowFocusChangeListener { focused ->
+                        if (focused) applyAppearance()
+                    }
+                view.viewTreeObserver.addOnWindowFocusChangeListener(focusListener)
+                onDispose { view.viewTreeObserver.removeOnWindowFocusChangeListener(focusListener) }
             }
         }
     }
     CompositionLocalProvider(
         LocalMarqueeEnabled provides appearanceState.marquee,
         LocalHydraTitleVisible provides appearanceState.showHydraTitle,
+        LocalRelativeTimeEnabled provides appearanceState.relativeTime,
+        LocalThinkingAnimation provides appearanceState.thinking,
+        LocalResponseFade provides appearanceState.responseFade,
+        LocalResponseFadeMillis provides appearanceState.fadeMillis,
     ) {
         MaterialTheme(
             colorScheme = scheme,

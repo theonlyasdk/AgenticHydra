@@ -1,24 +1,22 @@
 package app.agentichydra
 
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
-import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
+import kotlinx.coroutines.withContext
 import okhttp3.*
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import org.json.JSONArray
 import org.json.JSONObject
 import org.jsoup.Jsoup
-import org.jsoup.parser.Parser
 import java.io.IOException
 import java.net.InetAddress
 import java.net.UnknownHostException
 import java.util.concurrent.TimeUnit
-import kotlin.coroutines.resume
-import kotlin.coroutines.resumeWithException
 
 internal fun isPublicAddress(address: InetAddress): Boolean {
     val bytes = address.address
@@ -33,6 +31,7 @@ internal fun isPublicAddress(address: InetAddress): Boolean {
 
 class WorkWeb(
     client: OkHttpClient,
+    private val allowHttp: () -> Boolean = { false },
 ) {
     private val client =
         client
@@ -60,8 +59,13 @@ class WorkWeb(
     private suspend fun page(rawUrl: String): Page {
         var url = rawUrl.toHttpUrl()
         repeat(5) {
-            require(url.isHttps && url.port == 443 && url.username.isEmpty() && url.password.isEmpty()) {
-                "Use a public HTTPS URL without credentials."
+            val plain = !url.isHttps && url.port == 80 && allowHttp()
+            require((url.isHttps && url.port == 443 || plain) && url.username.isEmpty() && url.password.isEmpty()) {
+                if (allowHttp()) {
+                    "Use a public HTTP or HTTPS URL without credentials."
+                } else {
+                    "Use a public HTTPS URL without credentials."
+                }
             }
             if (url.host.contains(':') || Regex("\\d{1,3}(\\.\\d{1,3}){3}").matches(url.host)) {
                 require(isPublicAddress(InetAddress.getByName(url.host))) { "Only public web addresses are supported." }
@@ -74,73 +78,39 @@ class WorkWeb(
                     .header("Accept", "text/html,application/xhtml+xml,application/rss+xml,text/plain,application/json")
                     .build()
             val result =
-                suspendCancellableCoroutine<Page> { continuation ->
-                    val call = client.newCall(request)
-                    continuation.invokeOnCancellation { call.cancel() }
-                    call.enqueue(
-                        object : Callback {
-                            override fun onFailure(
-                                call: Call,
-                                e: IOException,
-                            ) {
-                                continuation.resumeWithException(e)
+                client.awaitResponse(request) { response ->
+                    if (response.isRedirect) {
+                        Page(
+                            request.url,
+                            "",
+                            response.header("Location") ?: throw IOException("Redirect has no destination."),
+                        )
+                    } else {
+                        if (!response.isSuccessful) throw IOException("Website returned HTTP ${response.code}.")
+                        val body = response.body ?: throw IOException("Website returned no content.")
+                        val type = body.contentType()
+                        require(
+                            type == null || type.type == "text" ||
+                                type.subtype.contains("xml") || type.subtype.contains("json"),
+                        ) {
+                            "This tool reads text pages, not binary downloads."
+                        }
+                        val bytes = ByteArray(1_048_577)
+                        var length = 0
+                        body.byteStream().use { input ->
+                            while (length < bytes.size) {
+                                val n = input.read(bytes, length, bytes.size - length)
+                                if (n < 0) break
+                                length += n
                             }
-
-                            override fun onResponse(
-                                call: Call,
-                                response: Response,
-                            ) {
-                                try {
-                                    response.use {
-                                        if (it.isRedirect) {
-                                            continuation.resume(
-                                                Page(
-                                                    request.url,
-                                                    "",
-                                                    it.header("Location")
-                                                        ?: throw IOException("Redirect has no destination."),
-                                                ),
-                                            )
-                                            return
-                                        }
-                                        if (!it.isSuccessful) throw IOException("Website returned HTTP ${it.code}.")
-                                        val body = it.body ?: throw IOException("Website returned no content.")
-                                        val type = body.contentType()
-                                        require(
-                                            type == null || type.type == "text" ||
-                                                type.subtype.contains("xml") || type.subtype.contains("json"),
-                                        ) {
-                                            "This tool reads text pages, not binary downloads."
-                                        }
-                                        val bytes = ByteArray(1_048_577)
-                                        var length = 0
-                                        body.byteStream().use { input ->
-                                            while (length < bytes.size) {
-                                                val n = input.read(bytes, length, bytes.size - length)
-                                                if (n < 0) break
-                                                length += n
-                                            }
-                                        }
-                                        require(length <= 1_048_576) { "Page exceeds the 1 MB limit." }
-                                        continuation.resume(
-                                            Page(
-                                                request.url,
-                                                String(
-                                                    bytes,
-                                                    0,
-                                                    length,
-                                                    type?.charset(Charsets.UTF_8) ?: Charsets.UTF_8,
-                                                ),
-                                                null,
-                                            ),
-                                        )
-                                    }
-                                } catch (e: Exception) {
-                                    continuation.resumeWithException(e)
-                                }
-                            }
-                        },
-                    )
+                        }
+                        require(length <= 1_048_576) { "Page exceeds the 1 MB limit." }
+                        Page(
+                            request.url,
+                            String(bytes, 0, length, type?.charset(Charsets.UTF_8) ?: Charsets.UTF_8),
+                            null,
+                        )
+                    }
                 }
             if (result.location == null) return result
             url = url.resolve(result.location) ?: throw IOException("Invalid redirect URL.")
@@ -302,12 +272,18 @@ class WorkWeb(
         val doc = Jsoup.parse(page.body, page.url.toString())
         doc.select("script,style,noscript,svg,nav,footer,header,aside,form").remove()
         val content = doc.selectFirst("main,article") ?: doc.body()
+        val plain = allowHttp()
         val links =
             content
                 .select("a[href]")
                 .mapNotNull { element ->
                     val href = canonicalSearchUrl(element.absUrl("href"))
-                    if (href?.startsWith("https://") == true) "${element.text().take(100)}: $href" else null
+                    val http = href?.startsWith("http://") == true && plain
+                    if (href != null && (href.startsWith("https://") || http)) {
+                        "${element.text().take(100)}: $href"
+                    } else {
+                        null
+                    }
                 }.distinct()
                 .take(12)
         val text =
@@ -407,4 +383,57 @@ class WorkWeb(
 internal fun parseSearchHtml(html: String): String =
     parseSearchHits(html).take(8).joinToString("\n\n") {
         "${it.title}\n${it.url}\n${it.snippet.take(500)}"
+    }
+
+/**
+ * Research and clock tools, offered with identical arguments and limits by chat, task, and
+ * background engines. Returns null for any other name so each caller keeps its own remaining branches.
+ */
+internal suspend fun researchTool(
+    web: WorkWeb,
+    name: String,
+    args: JSONObject,
+): WorkToolResult? =
+    when (name) {
+        "get_time" -> {
+            WorkToolResult(ScheduleTools.currentTime())
+        }
+
+        "web_search" -> {
+            withContext(Dispatchers.IO) {
+                WorkToolResult(web.search(args.getString("query"), SearchOptions.fromJson(args)))
+            }
+        }
+
+        "web_search_batch" -> {
+            withContext(Dispatchers.IO) {
+                val queries = args.getJSONArray("queries")
+                WorkToolResult(
+                    web.searchBatch(
+                        (0 until queries.length()).map { queries.getString(it) },
+                        SearchOptions.fromJson(args),
+                    ),
+                )
+            }
+        }
+
+        "fetch_url" -> {
+            withContext(Dispatchers.IO) {
+                WorkToolResult(
+                    web.fetch(args.getString("url"), args.optInt("max_chars", 10000), args.optInt("offset", 0)),
+                )
+            }
+        }
+
+        "find_in_page" -> {
+            withContext(Dispatchers.IO) {
+                WorkToolResult(
+                    web.find(args.getString("url"), args.getString("query"), args.optInt("max_matches", 6)),
+                )
+            }
+        }
+
+        else -> {
+            null
+        }
     }

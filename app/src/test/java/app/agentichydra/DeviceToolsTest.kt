@@ -134,7 +134,7 @@ class DeviceToolsTest {
                     ).getJSONObject("function")
                     .getString("name")
             }
-        assertEquals(53, names.size)
+        assertEquals(55, names.size)
         assertEquals(names.size, names.distinct().size)
         assertEquals(WorkTools.names.toSet(), names.toSet())
     }

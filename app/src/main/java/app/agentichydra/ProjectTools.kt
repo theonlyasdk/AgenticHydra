@@ -33,14 +33,7 @@ class ProjectTools(
         parts.forEachIndexed { index, name ->
             require(current.isDirectory) { "A parent path is not a directory." }
             current = current.findFile(name) ?: if (create) {
-                val mime =
-                    if (name.contains('.') && name.substringAfterLast('.').isNotBlank()) {
-                        android.webkit.MimeTypeMap.getSingleton().getMimeTypeFromExtension(
-                            name.substringAfterLast('.').lowercase(),
-                        ) ?: "application/octet-stream"
-                    } else {
-                        "*/*"
-                    }
+                val mime = mimeFor(name)
                 (
                     if (index == parts.lastIndex) {
                         current.createFile(
@@ -56,6 +49,25 @@ class ProjectTools(
             }
         }
         return current
+    }
+
+    private fun mimeFor(name: String): String =
+        if (name.contains('.') && name.substringAfterLast('.').isNotBlank()) {
+            android.webkit.MimeTypeMap.getSingleton().getMimeTypeFromExtension(
+                name.substringAfterLast('.').lowercase(),
+            ) ?: "application/octet-stream"
+        } else {
+            "*/*"
+        }
+
+    /** Creates a new file for a download, refusing to replace anything that already exists. */
+    fun createDownloadDestination(path: String): DocumentFile {
+        val parts = ToolPolicy.parts(path)
+        require(parts.isNotEmpty()) { "Choose a file path, not the project root." }
+        val parent = if (parts.size == 1) root else resolve(parts.dropLast(1).joinToString("/"), create = true)
+        val name = parts.last()
+        require(parent.findFile(name) == null) { "A file already exists at $path. Choose another path." }
+        return parent.createFile(mimeFor(name), name) ?: error("Could not create $path.")
     }
 
     fun read(path: String): String {
@@ -214,8 +226,11 @@ class ProjectTools(
             }
 
             "delete_file" -> {
-                val before = read(path)
-                require(resolve(path).delete()) { "Could not delete the file." }
+                val file = resolve(path)
+                require(file.isFile) { "Choose a file, not a directory." }
+                // Content is only for the change preview; large or binary files still delete cleanly.
+                val before = runCatching { read(path) }.getOrDefault("")
+                require(file.delete()) { "Could not delete the file." }
                 WorkToolResult("Deleted $path.", listOf(FileChange(path, before, "")))
             }
 

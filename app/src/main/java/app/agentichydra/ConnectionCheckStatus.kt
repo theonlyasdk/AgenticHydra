@@ -17,17 +17,21 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.ProgressBarRangeInfo
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.progressBarRangeInfo
 import androidx.compose.ui.tooling.preview.Preview
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.google.android.material.loadingindicator.LoadingIndicator
+import kotlin.math.roundToInt
 import kotlinx.coroutines.delay
 
 @Composable
@@ -87,6 +91,8 @@ fun ShimmerStatusText(
     modifier: Modifier = Modifier,
     style: androidx.compose.ui.text.TextStyle = MaterialTheme.typography.bodyLarge,
     maxLines: Int = Int.MAX_VALUE,
+    softWrap: Boolean = true,
+    brushWidth: Float? = null,
 ) {
     val cs = MaterialTheme.colorScheme
     var textWidth by remember { mutableFloatStateOf(1f) }
@@ -97,10 +103,12 @@ fun ShimmerStatusText(
         label = "Shine position",
     )
     val highlight = if (cs.surface.luminance() < .5f) cs.inverseSurface else cs.surfaceContainerLowest
+    val width = brushWidth ?: textWidth
     Text(
         text,
         modifier.onSizeChanged { textWidth = it.width.coerceAtLeast(1).toFloat() },
         maxLines = maxLines,
+        softWrap = softWrap,
         overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
         style =
             style.copy(
@@ -111,28 +119,39 @@ fun ShimmerStatusText(
                         .5f to highlight,
                         .7f to cs.onSurfaceVariant,
                         1f to cs.onSurfaceVariant,
-                        start = Offset((shine - .3f) * textWidth, 0f),
-                        end = Offset((shine + .3f) * textWidth, 0f),
+                        start = Offset((shine - .3f) * width, 0f),
+                        end = Offset((shine + .3f) * width, 0f),
                     ),
             ),
     )
 }
 
+/** Material's defaults: a 34dp sprite morphing inside a 48dp container. */
+internal const val LOADING_CONTAINER_DP = 48f
+internal const val LOADING_SPRITE_DP = 34f
+
 @Composable
 fun HydraLoadingIndicator(
-    size: androidx.compose.ui.unit.Dp,
-    indicator: androidx.compose.ui.graphics.Color,
-    container: androidx.compose.ui.graphics.Color,
+    size: Dp,
+    indicator: Color,
+    container: Color,
+    modifier: Modifier = Modifier,
 ) {
-    // The real Material 3 Expressive shape-morphing indicator, hosted in Compose.
+    // The widget clips to its own bounds instead of scaling down, so a small host crops the morph.
+    // Ask the view for the container and sprite sizes directly and it lays itself out at that size.
+    val containerPx = with(LocalDensity.current) { size.roundToPx() }
+    val spritePx = (containerPx * LOADING_SPRITE_DP / LOADING_CONTAINER_DP).roundToInt()
     AndroidView(factory = { context ->
         LoadingIndicator(
             ContextThemeWrapper(context, com.google.android.material.R.style.Theme_Material3_DayNight_NoActionBar),
         )
     }, update = { view ->
+        view.setContainerWidth(containerPx)
+        view.setContainerHeight(containerPx)
+        view.setIndicatorSize(spritePx)
         view.setIndicatorColor(indicator.toArgb())
         view.setContainerColor(container.toArgb())
-    }, modifier = Modifier.size(size))
+    }, modifier = modifier.size(size))
 }
 
 @Preview(name = "Connection check light")

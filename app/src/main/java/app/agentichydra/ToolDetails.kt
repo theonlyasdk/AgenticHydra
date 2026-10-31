@@ -30,8 +30,6 @@ import org.json.JSONObject
 /** Keys whose values read better as monospace blocks than as prose. */
 private val codeKeys = setOf("content", "old_text", "new_text", "diff", "command")
 
-private fun fieldLabel(key: String) = key.replace('_', ' ').replaceFirstChar { it.uppercase() }
-
 @Composable
 internal fun ToolArgumentsView(
     arguments: String,
@@ -86,7 +84,7 @@ private fun TreeObject(
             .toList()
     Column(modifier.fillMaxWidth()) {
         entries.forEachIndexed { index, (key, child) ->
-            TreeRow(fieldLabel(key), key, child, depth, index == entries.lastIndex, ancestors)
+            TreeRow(humanizedLabel(key), key, child, depth, index == entries.lastIndex, ancestors)
         }
     }
 }

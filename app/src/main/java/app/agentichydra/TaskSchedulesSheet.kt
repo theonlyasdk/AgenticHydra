@@ -10,11 +10,14 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
+import java.time.Instant
+import java.time.LocalDate
+import java.time.ZoneId
+import java.time.ZoneOffset
 import java.util.Date
 
 @Composable
@@ -34,6 +37,7 @@ internal fun TaskSchedulesSheet(
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun TaskScheduleContent(
     schedules: TaskSchedules,
@@ -46,52 +50,34 @@ private fun TaskScheduleContent(
     var deleting by remember { mutableStateOf<ScheduledTask?>(null) }
     var editTitle by remember { mutableStateOf("") }
     var editPrompt by remember { mutableStateOf("") }
-    var editTime by remember { mutableStateOf("") }
+    var editRunAt by remember { mutableStateOf(0L) }
     var editError by remember { mutableStateOf<String?>(null) }
     val records = schedules.records
+
+    fun beginEdit(record: ScheduledTask) {
+        editTitle = record.title
+        editPrompt = record.prompt
+        editRunAt = record.runAt
+        editError = null
+        editing = record
+    }
     Column(
         Modifier.fillMaxWidth().padding(horizontal = 16.dp).padding(bottom = 24.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            Icon(Icons.Outlined.Schedule, null, tint = cs.primary)
-            Text("Scheduled tasks", style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f))
+        SheetHeader(Icons.Outlined.Schedule, "Scheduled tasks") {
             HintIconButton("Close scheduled tasks", Icons.Outlined.Close, onClick = onDismiss)
         }
         LazyColumn(Modifier.heightIn(max = 480.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             if (records.isEmpty()) {
-                item {
-                    Column(
-                        Modifier.fillMaxWidth().padding(vertical = 48.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.spacedBy(12.dp),
-                    ) {
-                        Icon(Icons.Outlined.Schedule, null, Modifier.size(56.dp), tint = cs.onSurfaceVariant)
-                        Text(
-                            "No scheduled tasks",
-                            style = MaterialTheme.typography.titleMedium,
-                            color = cs.onSurfaceVariant,
-                        )
-                    }
-                }
+                item { HydraEmptyState(Icons.Outlined.Schedule, "No scheduled tasks") }
             }
             items(records, key = { it.id }) { record ->
                 var rowMenu by remember { mutableStateOf(false) }
                 Surface(
                     color = cs.surfaceContainerHigh,
                     shape = MaterialTheme.shapes.large,
-                    onClick = {
-                        editTitle = record.title
-                        editPrompt = record.prompt
-                        editTime =
-                            java.time.OffsetDateTime
-                                .ofInstant(
-                                    java.time.Instant.ofEpochMilli(record.runAt),
-                                    java.time.ZoneId.systemDefault(),
-                                ).toString()
-                        editError = null
-                        editing = record
-                    },
+                    onClick = { beginEdit(record) },
                 ) {
                     ListItem(
                         headlineContent = { MarqueeTitle(record.title, surface = cs.surfaceContainerHigh) },
@@ -128,49 +114,30 @@ private fun TaskScheduleContent(
                                     onDismiss = { rowMenu = false },
                                     headerText = record.title,
                                 ) {
-                                    DropdownMenuItem(text = {
-                                        Text(
-                                            "Open conversation",
-                                        )
-                                    }, leadingIcon = { Icon(Icons.Outlined.ChatBubbleOutline, null) }, onClick = {
+                                    HydraMenuItem("Open conversation", Icons.Outlined.ChatBubbleOutline) {
                                         rowMenu = false
                                         onOpen(record.conversationId)
-                                    })
-                                    DropdownMenuItem(
-                                        text = { Text("Edit") },
-                                        leadingIcon = { Icon(Icons.Outlined.Edit, null) },
+                                    }
+                                    HydraMenuItem(
+                                        "Edit",
+                                        Icons.Outlined.Edit,
                                         enabled = record.state in setOf("Scheduled"),
-                                        onClick = {
-                                            rowMenu = false
-                                            editTitle = record.title
-                                            editPrompt = record.prompt
-                                            editTime =
-                                                java.time.OffsetDateTime
-                                                    .ofInstant(
-                                                        java.time.Instant.ofEpochMilli(record.runAt),
-                                                        java.time.ZoneId.systemDefault(),
-                                                    ).toString()
-                                            editError = null
-                                            editing = record
-                                        },
-                                    )
-                                    DropdownMenuItem(
-                                        text = { Text("Cancel task") },
-                                        leadingIcon = { Icon(Icons.Outlined.Cancel, null) },
+                                    ) {
+                                        rowMenu = false
+                                        beginEdit(record)
+                                    }
+                                    HydraMenuItem(
+                                        "Cancel task",
+                                        Icons.Outlined.Cancel,
                                         enabled = record.state in setOf("Scheduled", "Running"),
-                                        onClick = {
-                                            rowMenu = false
-                                            schedules.cancel(record.id)
-                                        },
-                                    )
-                                    DropdownMenuItem(
-                                        text = { Text("Delete") },
-                                        leadingIcon = { Icon(Icons.Outlined.DeleteOutline, null, tint = cs.error) },
-                                        onClick = {
-                                            rowMenu = false
-                                            deleting = record
-                                        },
-                                    )
+                                    ) {
+                                        rowMenu = false
+                                        schedules.cancel(record.id)
+                                    }
+                                    HydraMenuItem("Delete", Icons.Outlined.DeleteOutline, tint = cs.error) {
+                                        rowMenu = false
+                                        deleting = record
+                                    }
                                 }
                             }
                         },
@@ -181,6 +148,9 @@ private fun TaskScheduleContent(
         }
     }
     editing?.let { record ->
+        var showDatePicker by remember(record.id) { mutableStateOf(false) }
+        var showTimePicker by remember(record.id) { mutableStateOf(false) }
+        var pickedDate by remember(record.id) { mutableStateOf<LocalDate?>(null) }
         HydraBottomSheet(onDismiss = { editing = null }) { dismiss ->
             Column(
                 Modifier.fillMaxWidth().padding(horizontal = 16.dp),
@@ -204,26 +174,33 @@ private fun TaskScheduleContent(
                     label = { Text("Prompt") },
                     modifier = Modifier.fillMaxWidth(),
                 )
-                OutlinedTextField(editTime, {
-                    editTime = it
-                }, label = {
-                    Text(
-                        "Run at (ISO-8601 with offset)",
+                Surface(
+                    onClick = { showDatePicker = true },
+                    color = cs.surfaceContainerHigh,
+                    shape = MaterialTheme.shapes.medium,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    ListItem(
+                        headlineContent = { Text("Run at") },
+                        supportingContent = {
+                            Text(
+                                DateFormat.getMediumDateFormat(context).format(Date(editRunAt)) + " · " +
+                                    DateFormat.getTimeFormat(context).format(Date(editRunAt)),
+                            )
+                        },
+                        leadingContent = { Icon(Icons.Outlined.Event, null, tint = cs.primary) },
+                        trailingContent = { Icon(Icons.Outlined.ChevronRight, null) },
+                        colors = ListItemDefaults.colors(containerColor = cs.surfaceContainerHigh),
                     )
-                }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                }
                 editError?.let { Text(it, color = cs.error, style = MaterialTheme.typography.bodySmall) }
                 Button(
                     onClick = {
-                        val runAt = runCatching { ScheduleTools.parseTime(editTime) }.getOrNull()
-                        if (runAt == null) {
-                            editError = "Use an ISO-8601 timestamp with offset."
-                        } else {
-                            try {
-                                schedules.edit(record.id, editTitle, editPrompt, runAt)
-                                dismiss()
-                            } catch (e: Exception) {
-                                editError = e.message
-                            }
+                        try {
+                            schedules.edit(record.id, editTitle, editPrompt, editRunAt)
+                            dismiss()
+                        } catch (e: Exception) {
+                            editError = e.message
                         }
                     },
                     enabled = editTitle.isNotBlank() && editPrompt.isNotBlank(),
@@ -231,19 +208,76 @@ private fun TaskScheduleContent(
                 ) { Text("Save") }
             }
         }
+        if (showDatePicker) {
+            val initialDate = Instant.ofEpochMilli(editRunAt).atZone(ZoneId.systemDefault()).toLocalDate()
+            val dateState =
+                rememberDatePickerState(
+                    initialSelectedDateMillis =
+                        initialDate.atStartOfDay(ZoneOffset.UTC).toInstant().toEpochMilli(),
+                )
+            DatePickerDialog(
+                onDismissRequest = { showDatePicker = false },
+                confirmButton = {
+                    TextButton(onClick = {
+                        val chosen =
+                            dateState.selectedDateMillis?.let {
+                                Instant.ofEpochMilli(it).atZone(ZoneOffset.UTC).toLocalDate()
+                            }
+                        showDatePicker = false
+                        if (chosen != null) {
+                            pickedDate = chosen
+                            showTimePicker = true
+                        }
+                    }) { Text("Next") }
+                },
+                dismissButton = {
+                    TextButton(onClick = { showDatePicker = false }) { Text("Cancel") }
+                },
+            ) { DatePicker(dateState) }
+        }
+        if (showTimePicker) {
+            val initialTime = Instant.ofEpochMilli(editRunAt).atZone(ZoneId.systemDefault()).toLocalTime()
+            val timeState =
+                rememberTimePickerState(
+                    initialHour = initialTime.hour,
+                    initialMinute = initialTime.minute,
+                    is24Hour = DateFormat.is24HourFormat(context),
+                )
+            AlertDialog(
+                onDismissRequest = { showTimePicker = false },
+                title = { Text("Run time") },
+                text = { TimePicker(timeState) },
+                confirmButton = {
+                    TextButton(onClick = {
+                        val date =
+                            pickedDate
+                                ?: Instant.ofEpochMilli(editRunAt).atZone(ZoneId.systemDefault()).toLocalDate()
+                        editRunAt =
+                            date
+                                .atTime(timeState.hour, timeState.minute)
+                                .atZone(ZoneId.systemDefault())
+                                .toInstant()
+                                .toEpochMilli()
+                        pickedDate = null
+                        showTimePicker = false
+                    }) { Text("Set time") }
+                },
+                dismissButton = {
+                    TextButton(onClick = { showTimePicker = false }) { Text("Cancel") }
+                },
+            )
+        }
     }
     deleting?.let { record ->
-        AlertDialog(
-            onDismissRequest = { deleting = null },
-            title = { Text("Delete scheduled task?") },
-            text = { Text("“${record.title}” will be removed.") },
-            confirmButton = {
-                TextButton(onClick = {
-                    schedules.delete(record.id)
-                    deleting = null
-                }) { Text("Delete") }
+        ConfirmDialog(
+            title = "Delete scheduled task?",
+            body = "“${record.title}” will be removed.",
+            confirmLabel = "Delete",
+            onConfirm = {
+                schedules.delete(record.id)
+                deleting = null
             },
-            dismissButton = { TextButton(onClick = { deleting = null }) { Text("Cancel") } },
+            onDismiss = { deleting = null },
         )
     }
 }

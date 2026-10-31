@@ -38,6 +38,8 @@ import androidx.compose.ui.unit.Velocity
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 
 /** Keep the sheet composed until its exit animation finishes, including button dismissal. */
@@ -49,6 +51,7 @@ fun HydraBottomSheet(
     lock: Boolean = false,
     fillHeight: Boolean = false,
     swipeEnabled: Boolean = true,
+    onBackRequest: (() -> Unit)? = null,
     heading: (@Composable ColumnScope.(dismiss: () -> Unit) -> Unit)? = null,
     content: @Composable ColumnScope.(dismiss: () -> Unit) -> Unit,
 ) {
@@ -58,6 +61,7 @@ fun HydraBottomSheet(
         val keyboard = LocalSoftwareKeyboardController.current
         var closing by remember { mutableStateOf(false) }
         val latestDismiss by rememberUpdatedState(onDismiss)
+        val latestBack by rememberUpdatedState(onBackRequest)
         val dismiss: () -> Unit = {
             if (!closing) {
                 closing = true
@@ -73,7 +77,7 @@ fun HydraBottomSheet(
             }
         }
         ModalBottomSheet(
-            onDismissRequest = { latestDismiss() },
+            onDismissRequest = { (latestBack ?: latestDismiss)() },
             modifier =
                 Modifier
                     .windowInsetsPadding(
@@ -84,11 +88,11 @@ fun HydraBottomSheet(
             dragHandle = null,
             contentWindowInsets = { if (lock) WindowInsets(0, 0, 0, 0) else BottomSheetDefaults.windowInsets },
         ) {
-            SheetBody(fillHeight, lock, heading, content, dismiss)
+            SheetBody(fillHeight, lock, heading, content, dismiss, state)
         }
     } else {
         Dialog(
-            onDismissRequest = onDismiss,
+            onDismissRequest = { (onBackRequest ?: onDismiss)() },
             properties =
                 DialogProperties(
                     usePlatformDefaultWidth = false,
@@ -119,7 +123,7 @@ fun HydraBottomSheet(
                             .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Bottom))
                             .padding(top = 8.dp),
                     ) {
-                        SheetBody(fillHeight, lock, heading, content, onDismiss)
+                        SheetBody(fillHeight, lock, heading, content, onDismiss, sheetState = null)
                     }
                 }
             }
@@ -127,6 +131,10 @@ fun HydraBottomSheet(
     }
 }
 
+/** After the sheet tops out, give the entrance a beat to settle before allowing size changes. */
+private const val SHEET_SETTLE_MILLIS = 250L
+
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun SheetBody(
     fillHeight: Boolean,
@@ -134,13 +142,38 @@ private fun SheetBody(
     heading: (@Composable ColumnScope.(dismiss: () -> Unit) -> Unit)?,
     content: @Composable ColumnScope.(dismiss: () -> Unit) -> Unit,
     dismiss: () -> Unit,
+    sheetState: SheetState?,
 ) {
+    // Size animation stays off for the whole entrance: enabling it while the sheet is still
+    // sliding re-measures the content and shows up as a jitter just before it tops out.
+    var animateSize by remember { mutableStateOf(false) }
+    LaunchedEffect(sheetState) {
+        if (sheetState == null) {
+            animateSize = true
+            return@LaunchedEffect
+        }
+        snapshotFlow { sheetState.currentValue == SheetValue.Expanded }
+            .distinctUntilChanged()
+            .collect { expanded ->
+                if (expanded) {
+                    delay(SHEET_SETTLE_MILLIS)
+                    animateSize = true
+                } else {
+                    animateSize = false
+                }
+            }
+    }
     Column(
         Modifier
             .fillMaxWidth()
             .then(if (fillHeight) Modifier.fillMaxHeight() else Modifier)
-            .animateContentSize(animationSpec = tween(durationMillis = 180, easing = LinearOutSlowInEasing))
-            .padding(top = 16.dp),
+            .then(
+                if (animateSize) {
+                    Modifier.animateContentSize(animationSpec = tween(durationMillis = 180, easing = LinearOutSlowInEasing))
+                } else {
+                    Modifier
+                },
+            ).padding(top = 16.dp),
     ) {
         if (heading == null) {
             content(dismiss)

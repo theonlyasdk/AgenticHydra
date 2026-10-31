@@ -1,6 +1,5 @@
 package app.agentichydra
 
-import android.content.Intent
 import android.graphics.Typeface
 import android.view.View
 import android.widget.Toast
@@ -30,7 +29,6 @@ import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.AnnotatedString
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -89,19 +87,13 @@ private fun FileListContent(
 ) {
     val cs = MaterialTheme.colorScheme
     Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp).padding(bottom = 24.dp)) {
-        Row(
-            Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
-            Icon(Icons.Outlined.FolderOpen, null, tint = cs.primary)
-            Text("Project files", style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f))
+        SheetHeader(Icons.Outlined.FolderOpen, "Project files") {
             HintIconButton("Refresh project files", Icons.Outlined.Refresh, onClick = { vm.refreshFiles() })
             HintIconButton("Close project files", Icons.Outlined.Close, onClick = onDismiss)
         }
         Breadcrumb(vm)
         if (vm.files.isEmpty()) {
-            WorkEmptyState(
+            HydraEmptyState(
                 icon = Icons.Outlined.FolderOpen,
                 title = if (vm.projectUri == null) "Choose a project folder" else "No files here",
                 body =
@@ -229,6 +221,7 @@ private fun FileEditorContent(
 ) {
     val cs = MaterialTheme.colorScheme
     val context = LocalContext.current
+    val externalPrompt = LocalExternalIntentPrompt.current
     val clipboard = LocalClipboardManager.current
     val scope = rememberCoroutineScope()
     val editorScheme = remember(cs) { editorColors(cs) }
@@ -278,85 +271,59 @@ private fun FileEditorContent(
                 style = MaterialTheme.typography.titleMedium,
             )
             Box {
-                HintIconButton("File options", Icons.Outlined.MoreVert, onClick = { menu = true })
+                HintIconButton("File options", Icons.Outlined.MoreHoriz, onClick = { menu = true })
                 HydraOverflowMenu(menu, { menu = false }, headerText = path) {
-                    DropdownMenuItem(
-                        text = { Text(if (saving) "Saving…" else "Save") },
-                        leadingIcon = { Icon(Icons.Outlined.Save, null) },
+                    HydraMenuItem(
+                        if (saving) "Saving…" else "Save",
+                        Icons.Outlined.Save,
                         enabled = !saving,
-                        onClick = {
-                            menu = false
-                            val text = editor?.text?.toString() ?: initialText
-                            scope.launch {
-                                saving = true
-                                runCatching { vm.saveFile(path, text) }
-                                    .onSuccess { Toast.makeText(context, "Saved", Toast.LENGTH_SHORT).show() }
-                                    .onFailure {
-                                        Toast
-                                            .makeText(
-                                                context,
-                                                it.message ?: "Couldn't save this file.",
-                                                Toast.LENGTH_LONG,
-                                            ).show()
-                                    }
-                                saving = false
-                            }
-                        },
-                    )
-                    DropdownMenuItem(
-                        text = { Text("Copy all") },
-                        leadingIcon = { Icon(Icons.Outlined.ContentCopy, null) },
-                        onClick = {
-                            menu = false
-                            clipboard.setText(AnnotatedString(editor?.text?.toString() ?: initialText))
-                            Toast.makeText(context, "Copied", Toast.LENGTH_SHORT).show()
-                        },
-                    )
-                    DropdownMenuItem(
-                        text = { Text(if (wrap) "Disable word wrap" else "Enable word wrap") },
-                        leadingIcon = { Icon(Icons.AutoMirrored.Outlined.WrapText, null) },
-                        onClick = {
-                            menu = false
-                            wrap = !wrap
-                        },
-                    )
-                    DropdownMenuItem(
-                        text = { Text(if (full) "Exit full screen" else "Full screen") },
-                        leadingIcon = {
-                            Icon(if (full) Icons.Outlined.FullscreenExit else Icons.Outlined.Fullscreen, null)
-                        },
-                        onClick = {
-                            menu = false
-                            onFullChange(!full)
-                        },
-                    )
-                    DropdownMenuItem(
-                        text = { Text("Reload") },
-                        leadingIcon = { Icon(Icons.Outlined.Refresh, null) },
-                        onClick = {
-                            menu = false
-                            vm.browse(path)
-                            Toast.makeText(context, "Reloading…", Toast.LENGTH_SHORT).show()
-                        },
-                    )
-                    DropdownMenuItem(
-                        text = { Text("Share") },
-                        leadingIcon = { Icon(Icons.Outlined.Share, null) },
-                        onClick = {
-                            menu = false
-                            val text = editor?.text?.toString() ?: initialText
-                            runCatching {
-                                context.startActivity(
-                                    Intent.createChooser(
-                                        Intent(
-                                            Intent.ACTION_SEND,
-                                        ).setType("text/plain").putExtra(Intent.EXTRA_TEXT, text),
-                                        "Share file",
-                                    ),
-                                )
-                            }
-                        },
-                    )
+                    ) {
+                        menu = false
+                        val text = editor?.text?.toString() ?: initialText
+                        scope.launch {
+                            saving = true
+                            runCatching { vm.saveFile(path, text) }
+                                .onSuccess { Toast.makeText(context, "Saved", Toast.LENGTH_SHORT).show() }
+                                .onFailure {
+                                    Toast
+                                        .makeText(
+                                            context,
+                                            it.message ?: "Couldn't save this file.",
+                                            Toast.LENGTH_LONG,
+                                        ).show()
+                                }
+                            saving = false
+                        }
+                    }
+                    HydraMenuItem("Copy all", Icons.Outlined.ContentCopy) {
+                        menu = false
+                        clipboard.setText(AnnotatedString(editor?.text?.toString() ?: initialText))
+                        Toast.makeText(context, "Copied", Toast.LENGTH_SHORT).show()
+                    }
+                    HydraMenuItem(
+                        if (wrap) "Disable word wrap" else "Enable word wrap",
+                        Icons.AutoMirrored.Outlined.WrapText,
+                    ) {
+                        menu = false
+                        wrap = !wrap
+                    }
+                    HydraMenuItem(
+                        if (full) "Exit full screen" else "Full screen",
+                        if (full) Icons.Outlined.FullscreenExit else Icons.Outlined.Fullscreen,
+                    ) {
+                        menu = false
+                        onFullChange(!full)
+                    }
+                    HydraMenuItem("Reload", Icons.Outlined.Refresh) {
+                        menu = false
+                        vm.browse(path)
+                        Toast.makeText(context, "Reloading…", Toast.LENGTH_SHORT).show()
+                    }
+                    HydraMenuItem("Share", Icons.Outlined.Share) {
+                        menu = false
+                        val text = editor?.text?.toString() ?: initialText
+                        shareText(context, externalPrompt, "Share file", text)
+                    }
                 }
             }
             HintIconButton("Close file", Icons.Outlined.Close, onClick = onDismiss)
@@ -444,7 +411,7 @@ internal fun WorkChangesSheet(
                 HintIconButton("Close changes", Icons.Outlined.Close, onClick = dismiss)
             }
             if (changes.isEmpty()) {
-                WorkEmptyState(
+                HydraEmptyState(
                     icon = Icons.Outlined.Difference,
                     title = "No changes yet",
                     body = "File edits from this task will appear here.",
@@ -603,37 +570,6 @@ private fun DiffLines(preview: DiffPreview) {
     }
 }
 
-@Composable
-private fun WorkEmptyState(
-    icon: ImageVector,
-    title: String,
-    body: String? = null,
-) {
-    val cs = MaterialTheme.colorScheme
-    Column(
-        Modifier.fillMaxWidth().padding(vertical = 48.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(12.dp),
-    ) {
-        Icon(icon, null, Modifier.size(56.dp), tint = cs.onSurfaceVariant)
-        Text(
-            title,
-            style = MaterialTheme.typography.titleMedium,
-            color = cs.onSurfaceVariant,
-            textAlign = TextAlign.Center,
-        )
-        body?.let {
-            Text(
-                it,
-                style = MaterialTheme.typography.bodyMedium,
-                color = cs.onSurfaceVariant,
-                textAlign = TextAlign.Center,
-                modifier = Modifier.padding(horizontal = 24.dp),
-            )
-        }
-    }
-}
-
 private data class ChangeStatus(
     val label: String,
     val icon: ImageVector,
@@ -690,19 +626,4 @@ private fun fullPath(
     name: String,
 ): String = if (parent.isEmpty()) name else "$parent/$name"
 
-private fun editorColors(cs: ColorScheme): EditorColorScheme =
-    EditorColorScheme().apply {
-        setColor(EditorColorScheme.WHOLE_BACKGROUND, cs.surfaceContainerHigh.toArgb())
-        setColor(EditorColorScheme.TEXT_NORMAL, cs.onSurface.toArgb())
-        setColor(EditorColorScheme.LINE_NUMBER_BACKGROUND, cs.surfaceContainerHigh.toArgb())
-        setColor(EditorColorScheme.LINE_NUMBER, cs.onSurfaceVariant.toArgb())
-        setColor(EditorColorScheme.LINE_NUMBER_CURRENT, cs.primary.toArgb())
-        setColor(EditorColorScheme.CURRENT_LINE, cs.surfaceContainerHighest.toArgb())
-        setColor(EditorColorScheme.SELECTED_TEXT_BACKGROUND, cs.primaryContainer.toArgb())
-        setColor(EditorColorScheme.TEXT_SELECTED, cs.onPrimaryContainer.toArgb())
-        setColor(EditorColorScheme.LINE_DIVIDER, cs.outlineVariant.toArgb())
-        setColor(EditorColorScheme.SCROLL_BAR_THUMB, cs.onSurfaceVariant.toArgb())
-        setColor(EditorColorScheme.SCROLL_BAR_TRACK, cs.surfaceContainerHigh.toArgb())
-        setColor(EditorColorScheme.SELECTION_HANDLE, cs.primary.toArgb())
-        setColor(EditorColorScheme.SELECTION_INSERT, cs.primary.toArgb())
-    }
+private fun editorColors(cs: ColorScheme): EditorColorScheme = EditorColorScheme().applyMaterialColors(cs)

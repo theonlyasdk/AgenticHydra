@@ -1,6 +1,5 @@
 package app.agentichydra
 
-import android.content.Intent
 import android.graphics.Canvas
 import android.graphics.Paint
 import android.graphics.RectF
@@ -93,6 +92,8 @@ private fun markdownMetrics(style: TextStyle): MarkdownMetrics {
 @Composable
 internal fun rememberMarkdownRenderer(style: TextStyle): MarkdownRenderer {
     val context = LocalContext.current
+    val linkOpener = LocalLinkOpener.current
+    val externalPrompt = LocalExternalIntentPrompt.current
     val density = LocalDensity.current
     val cs = MaterialTheme.colorScheme
     val metrics = markdownMetrics(style)
@@ -110,6 +111,8 @@ internal fun rememberMarkdownRenderer(style: TextStyle): MarkdownRenderer {
     val indent = with(density) { 16.dp.toPx().toInt() }
     return remember(
         context,
+        linkOpener,
+        externalPrompt,
         metrics,
         code,
         headings,
@@ -168,7 +171,11 @@ internal fun rememberMarkdownRenderer(style: TextStyle): MarkdownRenderer {
                                 if (uri.scheme in
                                     listOf("https", "http", "mailto")
                                 ) {
-                                    runCatching { view.context.startActivity(Intent(Intent.ACTION_VIEW, uri)) }
+                                    if (linkOpener != null) {
+                                        linkOpener(url)
+                                    } else {
+                                        openExternally(view.context, url, externalPrompt)
+                                    }
                                 }
                                 Unit
                             }

@@ -189,3 +189,59 @@ internal fun searchFilterSchema(): Array<Pair<String, JSONObject>> =
                 "Best-effort search-provider date filter. Publication dates are not independently verified.",
             ).put("enum", JSONArray(listOf("all", "day", "week", "month", "year"))),
     )
+
+/**
+ * Function schemas for the research tools chat, task, and background engines all offer with the
+ * same parameters. Builders return a fresh object so two engines can never share a mutable JSON tree.
+ */
+internal object ResearchToolSchemas {
+    fun webSearch(): JSONObject =
+        toolSchema(
+            "web_search",
+            "Search public sources with deduplicated titles, URLs, snippets, and source IDs. Supports domain filters, result limits, best-effort freshness, and a five-minute cache. Results may be blocked or rate-limited.",
+            listOf("query"),
+            "query" to stringSchema("Search query, maximum 300 characters."),
+            *searchFilterSchema(),
+        )
+
+    fun webSearchBatch(): JSONObject =
+        toolSchema(
+            "web_search_batch",
+            "Run one to three independent searches, with at most two requests in parallel. Returns separate structured results and errors per query. Prefer over repeated sequential searches.",
+            listOf("queries"),
+            "queries" to
+                JSONObject()
+                    .put("type", "array")
+                    .put("minItems", 1)
+                    .put("maxItems", 3)
+                    .put("items", stringSchema("Distinct search query, maximum 300 characters.")),
+            *searchFilterSchema(),
+        )
+
+    fun fetchUrl(): JSONObject =
+        toolSchema(
+            "fetch_url",
+            "Read a public web page with source links and text pagination. Use next_offset to continue reading. No credentials, private addresses, scripts, or binary downloads; maximum download 1 MB. Parsed pages are cached five minutes.",
+            listOf("url"),
+            "url" to stringSchema("Public web URL."),
+            "max_chars" to integerSchema("Text budget, default 10,000 characters.", 1000, 12000),
+            "offset" to integerSchema("Text offset, default zero.", 0, 120000),
+        )
+
+    fun findInPage(): JSONObject =
+        toolSchema(
+            "find_in_page",
+            "Find literal text in a public web page, returning line numbers and short contextual excerpts. Reuses cached page text; efficient for locating relevant passages.",
+            listOf("url", "query"),
+            "url" to stringSchema("Public web URL."),
+            "query" to stringSchema("Text to find, 1–200 characters."),
+            "max_matches" to integerSchema("Maximum matches, default six.", 1, 10),
+        )
+
+    fun getTime(): JSONObject =
+        toolSchema(
+            "get_time",
+            "Read the device's current UTC/local time and time zone before interpreting dates.",
+            emptyList(),
+        )
+}

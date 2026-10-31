@@ -49,21 +49,7 @@ internal object TextMateSupport {
 
     fun colorScheme(cs: ColorScheme): EditorColorScheme? =
         runCatching {
-            TextMateColorScheme.create(ThemeRegistry.getInstance()).apply {
-                setColor(EditorColorScheme.WHOLE_BACKGROUND, cs.surfaceContainerHigh.toArgb())
-                setColor(EditorColorScheme.TEXT_NORMAL, cs.onSurface.toArgb())
-                setColor(EditorColorScheme.LINE_NUMBER_BACKGROUND, cs.surfaceContainerHigh.toArgb())
-                setColor(EditorColorScheme.LINE_NUMBER, cs.onSurfaceVariant.toArgb())
-                setColor(EditorColorScheme.LINE_NUMBER_CURRENT, cs.primary.toArgb())
-                setColor(EditorColorScheme.CURRENT_LINE, cs.surfaceContainerHighest.toArgb())
-                setColor(EditorColorScheme.SELECTED_TEXT_BACKGROUND, cs.primaryContainer.toArgb())
-                setColor(EditorColorScheme.TEXT_SELECTED, cs.onPrimaryContainer.toArgb())
-                setColor(EditorColorScheme.LINE_DIVIDER, cs.outlineVariant.toArgb())
-                setColor(EditorColorScheme.SCROLL_BAR_THUMB, cs.onSurfaceVariant.toArgb())
-                setColor(EditorColorScheme.SCROLL_BAR_TRACK, cs.surfaceContainerHigh.toArgb())
-                setColor(EditorColorScheme.SELECTION_HANDLE, cs.primary.toArgb())
-                setColor(EditorColorScheme.SELECTION_INSERT, cs.primary.toArgb())
-            }
+            TextMateColorScheme.create(ThemeRegistry.getInstance()).applyMaterialColors(cs)
         }.getOrNull()
 
     private fun scopeFor(path: String): String? =
@@ -80,3 +66,21 @@ internal object TextMateSupport {
             else -> null
         }
 }
+
+/** Applies the app's Material roles so both editor backends share one palette. */
+internal fun EditorColorScheme.applyMaterialColors(cs: ColorScheme): EditorColorScheme =
+    apply {
+        setColor(EditorColorScheme.WHOLE_BACKGROUND, cs.surfaceContainerHigh.toArgb())
+        setColor(EditorColorScheme.TEXT_NORMAL, cs.onSurface.toArgb())
+        setColor(EditorColorScheme.LINE_NUMBER_BACKGROUND, cs.surfaceContainerHigh.toArgb())
+        setColor(EditorColorScheme.LINE_NUMBER, cs.onSurfaceVariant.toArgb())
+        setColor(EditorColorScheme.LINE_NUMBER_CURRENT, cs.primary.toArgb())
+        setColor(EditorColorScheme.CURRENT_LINE, cs.surfaceContainerHighest.toArgb())
+        setColor(EditorColorScheme.SELECTED_TEXT_BACKGROUND, cs.primaryContainer.toArgb())
+        setColor(EditorColorScheme.TEXT_SELECTED, cs.onPrimaryContainer.toArgb())
+        setColor(EditorColorScheme.LINE_DIVIDER, cs.outlineVariant.toArgb())
+        setColor(EditorColorScheme.SCROLL_BAR_THUMB, cs.onSurfaceVariant.toArgb())
+        setColor(EditorColorScheme.SCROLL_BAR_TRACK, cs.surfaceContainerHigh.toArgb())
+        setColor(EditorColorScheme.SELECTION_HANDLE, cs.primary.toArgb())
+        setColor(EditorColorScheme.SELECTION_INSERT, cs.primary.toArgb())
+    }

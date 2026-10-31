@@ -11,8 +11,6 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.*
 import okhttp3.*
-import okhttp3.MediaType.Companion.toMediaType
-import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.IOException
@@ -55,6 +53,7 @@ data class Message(
     val attachments: List<MessageAttachment> = emptyList(),
     val finalResponse: Boolean = true,
     val thought: String = "",
+    val quiz: QuizAttempt? = null,
 ) {
     fun json() =
         JSONObject()
@@ -80,6 +79,7 @@ data class Message(
                 }
                 put("finalResponse", finalResponse)
                 if (thought.isNotBlank()) put("thought", thought)
+                quiz?.let { put("quiz", it.json()) }
             }
 
     companion object {
@@ -108,6 +108,7 @@ data class Message(
                 (0 until attached.length()).map { MessageAttachment.fromJson(attached.getJSONObject(it)) },
                 data.optBoolean("finalResponse", true),
                 data.optString("thought", ""),
+                data.optJSONObject("quiz")?.let { QuizAttempt.fromJson(it) },
             )
         }
     }
@@ -130,6 +131,21 @@ enum class Provider(
 ) {
     NIM("NVIDIA NIM", "https://integrate.api.nvidia.com/v1", "nvidia/nemotron-3.5-lightning-30b-a3b"),
     GEMINI("Gemini", "https://generativelanguage.googleapis.com/v1beta/openai", "gemini-3.5-flash"),
+    GROQ("Groq", "https://api.groq.com/openai/v1", "llama-3.3-70b-versatile"),
+    CEREBRAS("Cerebras", "https://api.cerebras.ai/v1", "llama-3.3-70b"),
+    OPENROUTER("OpenRouter", "https://openrouter.ai/api/v1", "openai/gpt-4o-mini"),
+    MISTRAL("Mistral", "https://api.mistral.ai/v1", "mistral-large-latest"),
+    TOGETHER(
+        "Together AI",
+        "https://api.together.xyz/v1",
+        "meta-llama/Llama-3.3-70B-Instruct-Turbo",
+    ),
+    FIREWORKS(
+        "Fireworks",
+        "https://api.fireworks.ai/inference/v1",
+        "accounts/fireworks/models/llama-v3p3-70b-instruct",
+    ),
+    DEEPSEEK("DeepSeek", "https://api.deepseek.com/v1", "deepseek-chat"),
     OLLAMA("Ollama", "http://192.168.1.10:11434/v1", "", false),
     LLAMACPP("llama.cpp", "http://192.168.1.10:8080/v1", "", false),
     CUSTOM("Custom endpoint", "https://api.example.com/v1", "", false),
@@ -190,6 +206,7 @@ class KeyVault(
 class HydraModel(
     app: Application,
 ) : AndroidViewModel(app) {
+    private val context = app.applicationContext
     private val prefs = app.getSharedPreferences("hydra", Context.MODE_PRIVATE)
     private val vault = KeyVault(app)
     private val client =
@@ -242,15 +259,32 @@ class HydraModel(
     private var responseTokens: Int? = null
     var steps by mutableStateOf<List<WorkStep>>(emptyList())
         private set
+    var contextUsage by mutableStateOf(ContextUsage())
+        private set
     var pendingQuestions by mutableStateOf<AgentQuestionRequest?>(null)
         private set
+    var pendingQuiz by mutableStateOf<AgentQuiz?>(null)
+        private set
     private var questionDecision: CompletableDeferred<String>? = null
-    private val web = WorkWeb(client)
+    private var quizDecision: CompletableDeferred<String>? = null
+
+    // The quiz finished during this turn, attached to the summary the model writes next.
+    private var turnQuiz: QuizAttempt? = null
+    private val web = WorkWeb(client) { allowsHttpWebTools(app) }
 
     // Raw API-side conversation (assistant tool calls + their results), so follow-ups stay well-formed.
     private var history = JSONArray()
 
     init {
+        reloadConversations()
+        ContextBudget.load(getApplication())
+        refreshContextUsage()
+        loadCatalog()
+        if (provider == Provider.NIM || !provider.keyRequired || apiKey.isNotBlank()) refreshModels()
+    }
+
+    /** Re-reads stored chats, so imported history appears without a restart. */
+    internal fun reloadConversations() {
         runCatching {
             val array = JSONArray(prefs.getString("history", "[]"))
             conversations =
@@ -272,8 +306,21 @@ class HydraModel(
                     )
                 }
         }
-        loadCatalog()
-        if (provider == Provider.NIM || !provider.keyRequired || apiKey.isNotBlank()) refreshModels()
+    }
+
+    internal fun refreshContextUsage() {
+        contextUsage =
+            measureContext(
+                history,
+                ContextBudget.chars,
+                systemChars = chatSystemPrompt().length.toLong(),
+                toolChars = ChatTools.schemaChars,
+            )
+    }
+
+    fun setContextTokens(tokens: Int) {
+        ContextBudget.choose(getApplication(), tokens)
+        refreshContextUsage()
     }
 
     fun configure(
@@ -309,11 +356,6 @@ class HydraModel(
     fun savedEndpoint(p: Provider) = prefs.getString("endpoint_${p.name}", if (p == provider) endpoint else p.base)!!
 
     fun savedModel(p: Provider) = prefs.getString("model_${p.name}", if (p == provider) model else "")!!
-
-    fun switchProvider(p: Provider) {
-        if (busy || p == provider) return
-        configure(p, savedEndpoint(p), savedModel(p), savedKey(p))
-    }
 
     fun chooseModel(
         id: String,
@@ -446,6 +488,7 @@ class HydraModel(
     }
 
     private fun persist() {
+        refreshContextUsage()
         if (messages.isEmpty()) return
         val saved = conversations.firstOrNull { it.id == activeId }
         val title =
@@ -512,6 +555,7 @@ class HydraModel(
         steps = emptyList()
         history = JSONArray()
         activeId = UUID.randomUUID().toString()
+        refreshContextUsage()
         error =
             null
         attachment = null
@@ -523,6 +567,7 @@ class HydraModel(
         messages = c.messages
         steps = c.steps
         history = repairedWorkHistory(c.apiHistory)
+        refreshContextUsage()
         error =
             null
         attachment = null
@@ -577,6 +622,9 @@ class HydraModel(
         questionDecision?.cancel()
         questionDecision = null
         pendingQuestions = null
+        quizDecision?.cancel()
+        quizDecision = null
+        pendingQuiz = null
         if (messages.lastOrNull()?.let { it.text.isBlank() && it.thought.isBlank() } == true) {
             messages = messages.dropLast(1)
         }
@@ -623,6 +671,7 @@ class HydraModel(
         busy = true
         persist()
         history.put(JSONObject().put("role", "user").put("content", content))
+        refreshContextUsage()
         beginTurn()
         return true
     }
@@ -639,8 +688,10 @@ class HydraModel(
         val requestEndpoint = endpoint
         val requestKey = apiKey
         val requestConversationId = activeId
+        val rateLimit = RateLimitPolicy.forProvider(context, requestProvider)
         responseStartedAt = SystemClock.elapsedRealtime()
         responseTokens = null
+        turnQuiz = null
         // The placeholder shows the waiting indicator until the first streamed chunk arrives.
         val placeholder =
             Message(
@@ -735,22 +786,16 @@ class HydraModel(
                         while (true) {
                             currentCoroutineContext().ensureActive()
                             // Rebuild the wire every round so prior tool calls and results are replayed.
-                            val wire =
-                                JSONArray().put(
-                                    JSONObject().put("role", "system").put("content", chatSystemPrompt()),
-                                )
-                            for (i in 0 until history.length()) wire.put(history.getJSONObject(i))
+                            val wire = chatWire(chatSystemPrompt(), history, ContextBudget.chars, ChatTools.schemaChars)
                             val payload =
-                                JSONObject()
-                                    .put("model", requestModel)
-                                    .put("messages", wire)
-                                    .put("tools", ChatTools.schema())
-                                    .put("tool_choice", "auto")
-                                    .put("stream", true)
-                            if (requestProvider != Provider.CUSTOM) {
-                                payload.put("stream_options", JSONObject().put("include_usage", true))
-                            }
-                            ReasoningPolicy.apply(payload, selectedReasoning, selectedEffort)
+                                chatPayload(
+                                    requestModel,
+                                    wire,
+                                    ChatTools.schema(),
+                                    requestProvider,
+                                    selectedReasoning,
+                                    selectedEffort,
+                                )
                             val turnPayload =
                                 if (includeTools) {
                                     payload
@@ -769,6 +814,27 @@ class HydraModel(
                                     requestProvider,
                                     onCall = { active -> call = active },
                                     retryWithoutTools = true,
+                                    rateLimit = rateLimit,
+                                    onRateLimitWait = { waitMillis ->
+                                        withContext(Dispatchers.Main) {
+                                            if (currentGeneration == generation) {
+                                                messages =
+                                                    messages.filterNot {
+                                                        it.role == "notice" && isRateLimitNotice(it.text)
+                                                    } + Message("notice", rateLimitNotice(waitMillis))
+                                            }
+                                        }
+                                    },
+                                    onRateLimitCleared = {
+                                        withContext(Dispatchers.Main) {
+                                            if (currentGeneration == generation) {
+                                                messages =
+                                                    messages.filterNot {
+                                                        it.role == "notice" && isRateLimitNotice(it.text)
+                                                    }
+                                            }
+                                        }
+                                    },
                                     onThought = { thoughtChunk ->
                                         streamThought = thoughtChunk
                                         publishDraft(streamText, thoughtChunk)
@@ -783,19 +849,9 @@ class HydraModel(
                                 includeTools = false
                             }
                             currentCoroutineContext().ensureActive()
-                            val message = response.getJSONArray("choices").getJSONObject(0).getJSONObject("message")
+                            val message = response.assistantMessage()
                             history.put(message)
-                            val rawText = if (message.isNull("content")) "" else message.optString("content", "")
-                            val rawThought =
-                                message
-                                    .optString(
-                                        "reasoning_content",
-                                    ).ifEmpty {
-                                        message
-                                            .optString(
-                                                "reasoning",
-                                            ).ifEmpty { message.optString("thought") }
-                                    }
+                            val (rawText, rawThought) = message.responseTextAndThought()
                             val (text, finalThought) = extractThought(rawText, rawThought.ifEmpty { streamThought })
                             val usageTokens =
                                 response.optJSONObject("usage")?.optInt("completion_tokens", -1) ?: -1
@@ -821,6 +877,7 @@ class HydraModel(
                                                         text = text,
                                                         thought = finalThought,
                                                         finalResponse = !hasToolCalls,
+                                                        quiz = turnQuiz,
                                                     )
                                                 } else {
                                                     it
@@ -840,6 +897,7 @@ class HydraModel(
                                                 providerName = requestProvider.label,
                                                 finalResponse = !hasToolCalls,
                                                 thought = finalThought,
+                                                quiz = turnQuiz,
                                             )
                                     }
                                 }
@@ -853,10 +911,9 @@ class HydraModel(
                             }
                             for (i in 0 until calls.length()) {
                                 currentCoroutineContext().ensureActive()
-                                val tool = calls.getJSONObject(i)
-                                val fn = tool.getJSONObject("function")
-                                val name = fn.getString("name")
-                                val argsText = fn.get("arguments").toString()
+                                val toolCall = calls.toolCallAt(i)
+                                val name = toolCall.name
+                                val argsText = toolCall.arguments
                                 val step = WorkStep(name, argsText)
                                 withContext(Dispatchers.Main) {
                                     if (currentGeneration == generation) {
@@ -886,20 +943,13 @@ class HydraModel(
                                                 if (it.id == step.id) {
                                                     it.copy(
                                                         state = if (result.failed) "Failed" else "Done",
-                                                        output = result.output.take(16000),
+                                                        output = result.output.take(MAX_TOOL_OUTPUT),
                                                     )
                                                 } else {
                                                     it
                                                 }
                                             }
-                                        history.put(
-                                            JSONObject()
-                                                .put(
-                                                    "role",
-                                                    "tool",
-                                                ).put("tool_call_id", tool.getString("id"))
-                                                .put("content", result.output.take(16000)),
-                                        )
+                                        history.put(toolResultMessage(toolCall.id, result.output))
                                         persist()
                                     }
                                 }
@@ -946,6 +996,8 @@ class HydraModel(
                     draftFlushJob?.cancel()
                     draftFlushJob = null
                     if (currentGeneration == generation) {
+                        // A stop mid-wait must not leave the transient rate-limit notice behind.
+                        messages = messages.filterNot { it.role == "notice" && isRateLimitNotice(it.text) }
                         if (messages.lastOrNull()?.let { it.text.isBlank() && it.thought.isBlank() } == true) {
                             messages = messages.dropLast(1)
                         }
@@ -964,6 +1016,8 @@ class HydraModel(
                         call = null
                         pendingQuestions = null
                         questionDecision = null
+                        pendingQuiz = null
+                        quizDecision = null
                         persist()
                         if (completed && messages.count { it.role == "assistant" } == 1) {
                             nameConversation(
@@ -998,6 +1052,7 @@ class HydraModel(
         messages = messages.take(index)
         val trimmed = historyToLastPrompt()
         if (trimmed.isNotEmpty()) history = JSONArray(trimmed)
+        refreshContextUsage()
         return beginTurn()
     }
 
@@ -1018,102 +1073,70 @@ class HydraModel(
         name: String,
         args: JSONObject,
     ): WorkToolResult =
-        when (name) {
-            "get_time" -> {
-                WorkToolResult(ScheduleTools.currentTime())
-            }
+        researchTool(web, name, args)
+            ?: when (name) {
+                "ask_user" -> {
+                    val request = QuestionTool.parse(args)
+                    val answer = CompletableDeferred<String>()
+                    questionDecision = answer
+                    pendingQuestions = request
+                    try {
+                        WorkToolResult(answer.await())
+                    } finally {
+                        if (pendingQuestions?.id == request.id) pendingQuestions = null
+                        questionDecision = null
+                    }
+                }
 
-            "web_search" -> {
-                withContext(
-                    Dispatchers.IO,
-                ) { WorkToolResult(web.search(args.getString("query"), SearchOptions.fromJson(args))) }
-            }
+                "quiz_user" -> {
+                    val quiz = QuizTool.parse(args)
+                    val answer = CompletableDeferred<String>()
+                    quizDecision = answer
+                    pendingQuiz = quiz
+                    try {
+                        WorkToolResult(answer.await())
+                    } finally {
+                        if (pendingQuiz?.id == quiz.id) pendingQuiz = null
+                        quizDecision = null
+                    }
+                }
 
-            "web_search_batch" -> {
-                withContext(Dispatchers.IO) {
-                    val queries = args.getJSONArray("queries")
-                    WorkToolResult(
-                        web.searchBatch(
-                            (0 until queries.length()).map { queries.getString(it) },
-                            SearchOptions.fromJson(args),
-                        ),
-                    )
+                else -> {
+                    WorkToolResult("Tool error: $name is not available in chat mode.", failed = true)
                 }
             }
-
-            "find_in_page" -> {
-                withContext(
-                    Dispatchers.IO,
-                ) {
-                    WorkToolResult(
-                        web.find(args.getString("url"), args.getString("query"), args.optInt("max_matches", 6)),
-                    )
-                }
-            }
-
-            "fetch_url" -> {
-                withContext(
-                    Dispatchers.IO,
-                ) {
-                    WorkToolResult(
-                        web.fetch(args.getString("url"), args.optInt("max_chars", 10000), args.optInt("offset", 0)),
-                    )
-                }
-            }
-
-            "ask_user" -> {
-                val request = QuestionTool.parse(args)
-                val answer = CompletableDeferred<String>()
-                questionDecision = answer
-                pendingQuestions = request
-                try {
-                    WorkToolResult(answer.await())
-                } finally {
-                    if (pendingQuestions?.id == request.id) pendingQuestions = null
-                    questionDecision = null
-                }
-            }
-
-            else -> {
-                WorkToolResult("Tool error: $name is not available in chat mode.", failed = true)
-            }
-        }
 
     private fun chatSystemPrompt() =
-        "You are Hydra, a helpful, precise assistant running inside the Hydra app on the user's Android phone or tablet. This is chat mode: you cannot edit files or execute commands, so describe steps instead of claiming to run them, and never assume a desktop OS such as Windows or macOS. You have read-only tools for current information: web_search, web_search_batch, fetch_url, find_in_page, and get_time; cite retrieved source URLs and be honest when search fails or returns nothing. Use ask_user only when choices or missing information need the user's answer."
+        "You are Hydra, a helpful, precise assistant running inside the Hydra app on the user's Android phone or tablet. This is chat mode: you cannot edit files or execute commands, so describe steps instead of claiming to run them, and never assume a desktop OS such as Windows or macOS. You have read-only tools for current information: web_search, web_search_batch, fetch_url, find_in_page, and get_time; cite retrieved source URLs and be honest when search fails or returns nothing. Use ask_user only when choices or missing information need the user's answer. Use quiz_user only when the user asks for a quiz or a knowledge check; mark every correct option and add a short markdown explanation per question."
 
     fun answerQuestions(
         id: String,
         answers: String?,
     ) {
         val request = pendingQuestions?.takeIf { it.id == id } ?: return
-        val result =
-            if (answers == null) {
-                JSONObject()
-                    .put("status", "cancelled")
-                    .put(
-                        "instruction",
-                        "The user dismissed these questions. Do not repeat them without new instructions.",
-                    ).toString()
-            } else {
-                val response = JSONObject(answers)
-                require(
-                    response.getString("status") == "answered" &&
-                        response.getJSONArray("answers").length() == request.questions.size,
-                ) { "Invalid question response." }
-                val values = response.getJSONArray("answers")
-                require(
-                    answers.length <= 15000 &&
-                        (0 until values.length()).all { index ->
-                            val value = values.getJSONObject(index)
-                            val question = request.questions[index]
-                            value.getString("id") == question.id && QuestionTool.valid(question, value)
-                        },
-                ) { "Question answers did not match the request." }
-                answers
-            }
-        questionDecision?.complete(result)
+        questionDecision?.complete(resolveQuestionAnswers(request, answers))
         pendingQuestions = null
+    }
+
+    fun finishQuiz(
+        id: String,
+        attempt: QuizAttempt,
+    ) {
+        val quiz = pendingQuiz?.takeIf { it.id == id } ?: return
+        val result =
+            runCatching { QuizTool.answer(quiz, attempt) }.getOrElse {
+                error = it.message
+                return
+            }
+        turnQuiz = attempt
+        quizDecision?.complete(result)
+        pendingQuiz = null
+    }
+
+    fun cancelQuiz(id: String) {
+        val quiz = pendingQuiz?.takeIf { it.id == id } ?: return
+        quizDecision?.complete(QuizTool.cancelled())
+        pendingQuiz = null
     }
 
     private fun nameConversation(
@@ -1130,9 +1153,21 @@ class HydraModel(
                 .firstOrNull { it.role == "assistant" }
                 ?.text
                 ?.takeIf { it.isNotBlank() } ?: return
+        val namingProvider = provider
+        val rateLimit = RateLimitPolicy.forProvider(context, namingProvider)
         viewModelScope.launch {
             try {
-                val title = ConversationNamer(client).generate(url, key, model, prompt, answer, reasoning)
+                val title =
+                    ConversationNamer(client).generate(
+                        url,
+                        key,
+                        model,
+                        prompt,
+                        answer,
+                        reasoning,
+                        namingProvider,
+                        rateLimit,
+                    )
                 // A model that cannot name the chat may answer `null` (or nothing): fall back to the first prompt.
                 if (title.isBlank() || title.equals("null", ignoreCase = true)) return@launch
                 // Re-read after the network call: a rename, deletion, or another chat may have happened.

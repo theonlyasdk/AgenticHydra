@@ -1,4 +1,5 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="com.termux.permission.RUN_COMMAND" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
@@ -9,25 +10,110 @@
     <uses-permission android:name="android.permission.VIBRATE" />
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
     <uses-permission android:name="com.android.alarm.permission.SET_ALARM" />
-    <uses-feature android:name="android.hardware.camera" android:required="false" />
-    <uses-feature android:name="android.hardware.camera.autofocus" android:required="false" />
-    <uses-feature android:name="android.hardware.camera.flash" android:required="false" />
-    <uses-feature android:name="android.hardware.location" android:required="false" />
-    <uses-feature android:name="android.hardware.location.network" android:required="false" />
-    <queries><package android:name="com.termux" /><intent><action android:name="android.intent.action.MAIN" /><category android:name="android.intent.category.LAUNCHER" /></intent></queries>
-    <application android:name=".HydraApplication" android:theme="@style/AppTheme" android:label="Agentic Hydra" android:icon="@mipmap/ic_launcher" android:roundIcon="@mipmap/ic_launcher" android:allowBackup="false" android:dataExtractionRules="@xml/data_extraction_rules" android:usesCleartextTraffic="true" android:supportsRtl="true">
-        <activity android:name=".WorkChatActivity" android:exported="false" android:windowSoftInputMode="adjustResize" />
-        <activity android:name=".SettingsActivity" android:exported="false" />
-        <activity android:name=".LanguageActivity" android:exported="false" />
-        <receiver android:name=".TermuxResultReceiver" android:exported="false" />
-        <provider android:name="androidx.core.content.FileProvider" android:authorities="${applicationId}.fileprovider"
-            android:exported="false" android:grantUriPermissions="true">
-            <meta-data android:name="android.support.FILE_PROVIDER_PATHS" android:resource="@xml/file_paths" />
-        </provider>
-        <service android:name=".TaskService" android:exported="false" android:foregroundServiceType="dataSync" />
-        <service android:name="androidx.work.impl.foreground.SystemForegroundService" android:foregroundServiceType="dataSync" />
-        <activity android:name=".MainActivity" android:theme="@style/HydraStarting" android:exported="true" android:windowSoftInputMode="adjustResize">
-            <intent-filter><action android:name="android.intent.action.MAIN" /><category android:name="android.intent.category.LAUNCHER" /></intent-filter>
+    <uses-permission android:name="android.permission.CAMERA" />
+
+    <uses-feature
+        android:name="android.hardware.camera"
+        android:required="false" />
+    <uses-feature
+        android:name="android.hardware.camera.autofocus"
+        android:required="false" />
+    <uses-feature
+        android:name="android.hardware.camera.flash"
+        android:required="false" />
+    <uses-feature
+        android:name="android.hardware.location"
+        android:required="false" />
+    <uses-feature
+        android:name="android.hardware.location.network"
+        android:required="false" />
+
+    <queries>
+        <package android:name="com.termux" />
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.LAUNCHER" />
+        </intent>
+    </queries>
+
+    <application
+        android:name=".HydraApplication"
+        android:label="Hydra"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher"
+        android:theme="@style/AppTheme"
+        android:enableOnBackInvokedCallback="false"
+        android:allowBackup="false"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:usesCleartextTraffic="true"
+        android:supportsRtl="true">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:theme="@style/HydraStarting"
+            android:windowSoftInputMode="adjustResize">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
         </activity>
+
+        <activity
+            android:name=".WorkChatActivity"
+            android:exported="false"
+            android:windowSoftInputMode="adjustResize" />
+        <activity
+            android:name=".SettingsActivity"
+            android:exported="false" />
+        <activity
+            android:name=".LanguageActivity"
+            android:exported="false" />
+        <activity
+            android:name=".AdvancedModelActivity"
+            android:exported="false" />
+        <activity
+            android:name=".QuizResultActivity"
+            android:exported="false" />
+        <activity
+            android:name=".ShareConfigActivity"
+            android:exported="false" />
+        <activity
+            android:name=".ReceiveConfigActivity"
+            android:exported="false" />
+        <activity
+            android:name=".OAuthCallbackActivity"
+            android:exported="true"
+            android:launchMode="singleTask">
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="app.agentichydra" android:host="oauth" android:pathPrefix="/mcp/callback" />
+            </intent-filter>
+        </activity>
+
+        <receiver
+            android:name=".TermuxResultReceiver"
+            android:exported="false" />
+
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
+
+        <service
+            android:name=".TaskService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+        <service
+            android:name="androidx.work.impl.foreground.SystemForegroundService"
+            android:foregroundServiceType="dataSync" />
     </application>
+
 </manifest>
