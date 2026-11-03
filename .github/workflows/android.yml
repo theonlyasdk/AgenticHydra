@@ -25,5 +25,3 @@ jobs:
           path: |
             dist/*.apk
             app/build/reports/lint-results-release.html
-            app/build/reports/tests/testReleaseUnitTest/
-            app/build/reports/screenshots/

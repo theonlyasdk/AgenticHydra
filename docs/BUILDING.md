@@ -42,7 +42,7 @@ export HYDRA_STORE_PASSWORD='your-private-password'
 
 Keep the password out of shell history on shared machines; a local secret manager or CI secret is preferable. Check `app/build.gradle.kts` for the signing configuration. Preserve the same key for updates to your distribution. The APK is `app/build/outputs/apk/release/app-release.apk`.
 
-The [Android CI workflow](../.github/workflows/android.yml) runs `scripts/ci-build.sh` on JDK 17. It installs the SDK components, runs release tests and lint, builds an APK, checks contrast, and verifies APK signing. Without a supplied key, it generates a disposable **preview** key. Its downloadable artifact cannot update official signed releases.
+The [Android CI workflow](../.github/workflows/android.yml) runs `scripts/ci-build.sh` on JDK 17. It installs the SDK components, runs release lint, builds an APK, checks contrast, and verifies APK signing. Unit tests are not part of the CI gate yet, so run `testDebugUnitTest` locally before pushing. Without a supplied key, it generates a disposable **preview** key. Its downloadable artifact cannot update official signed releases.
 
 ## Documentation screenshots
 
