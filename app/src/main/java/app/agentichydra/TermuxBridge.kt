@@ -13,9 +13,11 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeout
 import java.io.IOException
@@ -112,11 +114,19 @@ object TermuxBridge {
         }
     }
 
+    /**
+     * Runs [command] in Termux and awaits its result. When [logPath] is given, stdout and
+     * stderr are also tee'd into that shared-storage file and [readLog] is polled while the
+     * command runs, so [onOutput] receives a live tail (opencode-style) before the final result.
+     */
     suspend fun execute(
         context: Context,
         directory: String,
         command: String,
         timeoutMillis: Long = 180_000,
+        logPath: String? = null,
+        readLog: (suspend () -> String)? = null,
+        onOutput: suspend (String) -> Unit = {},
     ): TermuxResult {
         check(installed(context)) { "Install Termux from F-Droid or its official GitHub releases first." }
         check(allowed(context)) { "Grant Hydra the Termux Run Commands permission in User → Termux setup." }
@@ -131,11 +141,18 @@ object TermuxBridge {
         val flags = PendingIntent.FLAG_ONE_SHOT or (if (Build.VERSION.SDK_INT >= 31) PendingIntent.FLAG_MUTABLE else 0)
         val callback = PendingIntent.getBroadcast(context, 0, callbackIntent, flags)
         try {
+            val script =
+                if (logPath != null) {
+                    val escaped = logPath.replace("'", "'\\''")
+                    "exec > >(tee -a '$escaped') 2> >(tee -a '$escaped' >&2)\n$command"
+                } else {
+                    command
+                }
             val intent =
                 Intent("com.termux.RUN_COMMAND")
                     .setClassName("com.termux", "com.termux.app.RunCommandService")
                     .putExtra("com.termux.RUN_COMMAND_PATH", "/data/data/com.termux/files/usr/bin/bash")
-                    .putExtra("com.termux.RUN_COMMAND_ARGUMENTS", arrayOf("-lc", command))
+                    .putExtra("com.termux.RUN_COMMAND_ARGUMENTS", arrayOf("-lc", script))
                     .putExtra("com.termux.RUN_COMMAND_WORKDIR", directory)
                     .putExtra("com.termux.RUN_COMMAND_BACKGROUND", true)
                     .putExtra("com.termux.RUN_COMMAND_PENDING_INTENT", callback)
@@ -148,7 +165,27 @@ object TermuxBridge {
                 throw e
             }
             return try {
-                withTimeout(timeoutMillis) { result.await() }
+                withTimeout(timeoutMillis) {
+                    if (logPath != null && readLog != null) {
+                        coroutineScope {
+                            val poller =
+                                launch {
+                                    while (isActive) {
+                                        delay(LIVE_POLL_MS)
+                                        val tail = readLog()
+                                        if (tail.isNotBlank()) onOutput(tail)
+                                    }
+                                }
+                            try {
+                                result.await()
+                            } finally {
+                                poller.cancel()
+                            }
+                        }
+                    } else {
+                        result.await()
+                    }
+                }
             } catch (_: TimeoutCancellationException) {
                 throw TermuxOfflineException(
                     "Termux did not return a result within ${timeoutMillis / 1000} seconds. " +
@@ -160,6 +197,8 @@ object TermuxBridge {
             callback.cancel()
         }
     }
+
+    private const val LIVE_POLL_MS = 700L
 }
 
 class TermuxResultReceiver : BroadcastReceiver() {

@@ -86,7 +86,10 @@ class WorkWeb(
                             response.header("Location") ?: throw IOException("Redirect has no destination."),
                         )
                     } else {
-                        if (!response.isSuccessful) throw IOException("Website returned HTTP ${response.code}.")
+                        if (!response.isSuccessful) {
+                            val detail = runCatching { response.peekBody(8192).string() }.getOrNull()
+                            throw IOException(describeHttpFailure("Website request failed", response.code, detail))
+                        }
                         val body = response.body ?: throw IOException("Website returned no content.")
                         val type = body.contentType()
                         require(

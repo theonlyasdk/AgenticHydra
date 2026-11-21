@@ -19,6 +19,7 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import app.agentichydra.mcp.optStringOrNull
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
@@ -132,6 +133,12 @@ class WorkModel(
     var selectedFile by mutableStateOf<Pair<String, String>?>(null)
     var files by mutableStateOf<List<String>>(emptyList())
         private set
+    var fileIndex by mutableStateOf<List<String>>(emptyList())
+        private set
+    var fileIndexLoading by mutableStateOf(false)
+        private set
+    private var fileIndexJob: Job? = null
+    private var fileIndexProject: String? = null
     var browserPath by mutableStateOf("")
         private set
     var draftAttachments by mutableStateOf<List<MessageAttachment>>(emptyList())
@@ -273,6 +280,7 @@ class WorkModel(
         browserPath = ""
         selectedFile = null
         refreshFiles("")
+        refreshFileIndex(force = true)
         if (task.isNotBlank()) {
             checkpoint()
             persistRecords()
@@ -337,6 +345,35 @@ class WorkModel(
 
     fun enterFolder(name: String) {
         refreshFiles((browserPath.takeIf { it.isNotEmpty() }?.plus("/") ?: "") + name)
+    }
+
+    /** Builds the fuzzy @-mention file index for the selected project, cancelling any stale walk. */
+    fun refreshFileIndex(force: Boolean = false) {
+        val uri = projectUri
+        if (uri == null) {
+            fileIndexJob?.cancel()
+            fileIndex = emptyList()
+            fileIndexProject = null
+            fileIndexLoading = false
+            return
+        }
+        if (!force && fileIndexProject == uri && (fileIndex.isNotEmpty() || fileIndexLoading)) return
+        fileIndexJob?.cancel()
+        fileIndexProject = uri
+        fileIndexLoading = true
+        fileIndexJob =
+            viewModelScope.launch {
+                val self = coroutineContext[Job]
+                try {
+                    fileIndex = runInterruptible(Dispatchers.IO) { projectTools().indexFiles() }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (_: Exception) {
+                    fileIndex = emptyList()
+                } finally {
+                    if (fileIndexJob === self) fileIndexLoading = false
+                }
+            }
     }
 
     fun browse(path: String) {
@@ -863,6 +900,7 @@ class WorkModel(
         job =
             viewModelScope.launch {
                 streamDraftId = null
+                var filesTouched = false
                 try {
                     if (!managedForeground) {
                         context.startForegroundService(
@@ -1147,6 +1185,7 @@ class WorkModel(
                                 }
                             currentCoroutineContext().ensureActive()
                             changes = changes + result.changes
+                            if (result.changes.isNotEmpty()) filesTouched = true
                             updateStep(
                                 step.id,
                                 if (!allow) {
@@ -1216,6 +1255,7 @@ class WorkModel(
                         checkpoint()
                         persistRecords()
                         prefs.edit().putBoolean("active", false).apply()
+                        if (filesTouched) refreshFileIndex(force = true)
                         if (!managedForeground && !engine.hasActiveRuns()) {
                             context.stopService(Intent(context, TaskService::class.java))
                         }
@@ -1372,6 +1412,13 @@ class WorkModel(
         steps = steps.map { if (it.id == id) it.copy(download = download) else it }
     }
 
+    private fun updateWait(
+        id: String,
+        wait: WaitProgress,
+    ) {
+        steps = steps.map { if (it.id == id) it.copy(wait = wait) else it }
+    }
+
     private fun systemPrompt() =
         """
         You are Hydra, a careful coding and research agent running as an Android app on the user's Android phone or tablet. Continue the same saved conversation across follow-up messages.
@@ -1379,6 +1426,7 @@ class WorkModel(
         Use actual tools to inspect files, edit code, run tests, and research public websites. Work relative to the selected project.
         Read before writing. Never delete files unless the user explicitly requests deletion. Never claim a command or search succeeded without a tool result.
         Edit existing files with apply_diff search/replace blocks when changing several spots; replace_in_file suits one exact replacement; write_file creates new files or performs complete rewrites.
+        The user may reference project files as @relative/path in their message; treat each as a file to read or act on, resolving it against the project root.
         Use read_image to view a project image (PNG, JPEG, WebP, or GIF up to 4 MB) before describing or editing it; the image is attached to your next request.
         A declined action must not be retried or bypassed through another tool without new user instructions.
         You run on Android: the shell is Termux bash (Linux), never PowerShell, CMD, or Windows conventions. Shell commands use the Termux bash shell and the project cwd; environment/packages are not guaranteed. Shared storage disallows executing files directly; use interpreters where needed.
@@ -1450,8 +1498,9 @@ class WorkModel(
                 val duration = ScheduleTools.waitMillis(name, args)
                 status = "Waiting"
                 progress = "Waiting until ${java.time.Instant.ofEpochMilli(System.currentTimeMillis() + duration)}"
-                checkpoint()
                 val started = android.os.SystemClock.elapsedRealtime()
+                updateWait(stepId, WaitProgress(started, duration))
+                checkpoint()
                 delay(duration)
                 WorkToolResult(
                     JSONObject()
@@ -1617,8 +1666,31 @@ class WorkModel(
                             args.getString("command")
                         }
                     }
-                val result = TermuxBridge.execute(getApplication(), directory, command)
-                WorkToolResult(result.render(), failed = result.exitCode != 0)
+                // A hidden shared-storage log lets Hydra tail the command live while Termux runs it.
+                val tools = projectTools()
+                val logName = ".hydra-termux-${UUID.randomUUID()}.log"
+                val logFile = withContext(Dispatchers.IO) { runCatching { tools.resolve(logName, create = true) }.getOrNull() }
+                try {
+                    val result =
+                        TermuxBridge.execute(
+                            getApplication(),
+                            directory,
+                            command,
+                            logPath = if (logFile != null) "$directory/$logName" else null,
+                            readLog =
+                                if (logFile != null) {
+                                    { withContext(Dispatchers.IO) { runCatching { tools.readTail(logName) }.getOrDefault("") } }
+                                } else {
+                                    null
+                                },
+                            onOutput = { tail -> updateStep(stepId, "Running", tail) },
+                        )
+                    WorkToolResult(result.render(), failed = result.exitCode != 0)
+                } finally {
+                    if (logFile != null) {
+                        withContext(NonCancellable + Dispatchers.IO) { runCatching { logFile.delete() } }
+                    }
+                }
             }
 
             "download_file" -> {

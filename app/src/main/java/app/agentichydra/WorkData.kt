@@ -151,6 +151,18 @@ data class DownloadProgress(
     }
 }
 
+/** Live countdown for wait_for / wait_until steps, drawn as the tool row's background fill. */
+data class WaitProgress(
+    val startedElapsed: Long,
+    val durationMillis: Long,
+) {
+    fun json() = JSONObject().put("startedElapsed", startedElapsed).put("durationMillis", durationMillis)
+
+    companion object {
+        fun fromJson(o: JSONObject) = WaitProgress(o.optLong("startedElapsed"), o.optLong("durationMillis"))
+    }
+}
+
 data class WorkStep(
     val tool: String,
     val arguments: String,
@@ -159,6 +171,7 @@ data class WorkStep(
     val id: String = UUID.randomUUID().toString(),
     val createdAt: Long = System.currentTimeMillis(),
     val download: DownloadProgress? = null,
+    val wait: WaitProgress? = null,
 ) {
     fun json() =
         JSONObject()
@@ -170,7 +183,10 @@ data class WorkStep(
             .put("output", output.take(MAX_TOOL_OUTPUT))
             .put("id", id)
             .put("createdAt", createdAt)
-            .apply { download?.let { put("download", it.json()) } }
+            .apply {
+                download?.let { put("download", it.json()) }
+                wait?.let { put("wait", it.json()) }
+            }
 
     companion object {
         fun fromJson(o: JSONObject) =
@@ -182,6 +198,7 @@ data class WorkStep(
                 o.optString("id").ifBlank { UUID.randomUUID().toString() },
                 o.optLong("createdAt", 0),
                 o.optJSONObject("download")?.let(DownloadProgress::fromJson),
+                o.optJSONObject("wait")?.let(WaitProgress::fromJson),
             )
     }
 }

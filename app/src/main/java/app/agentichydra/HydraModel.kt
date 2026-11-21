@@ -257,6 +257,7 @@ class HydraModel(
     private var generation = 0
     private var responseStartedAt = -1L
     private var responseTokens: Int? = null
+    private var interruptedDraftId: String? = null
     var steps by mutableStateOf<List<WorkStep>>(emptyList())
         private set
     var contextUsage by mutableStateOf(ContextUsage())
@@ -619,6 +620,7 @@ class HydraModel(
         call = null
         job?.cancel()
         job = null
+        interruptedDraftId = null
         questionDecision?.cancel()
         questionDecision = null
         pendingQuestions = null
@@ -679,6 +681,7 @@ class HydraModel(
     /** Launch a provider turn against the current history without appending a user prompt. */
     private fun beginTurn(): Boolean {
         error = null
+        interruptedDraftId = null
         busy = true
         val currentGeneration = ++generation
         val selectedReasoning = reasoning
@@ -988,6 +991,7 @@ class HydraModel(
                     // Stop preserves any partial response.
                 } catch (e: Exception) {
                     if (currentGeneration == generation) {
+                        interruptedDraftId = streamDraftId
                         error =
                             (if (e is IOException) e.message else null)
                                 ?: "Couldn’t read the provider response. Check your connection and try again."
@@ -1053,6 +1057,20 @@ class HydraModel(
         val trimmed = historyToLastPrompt()
         if (trimmed.isNotEmpty()) history = JSONArray(trimmed)
         refreshContextUsage()
+        return beginTurn()
+    }
+
+    /**
+     * Resume a turn that failed mid-response (for example a provider timeout). The partial
+     * draft was never recorded in the API history, so drop it and replay from the last
+     * completed round, keeping any tool results that already finished.
+     */
+    fun continueResponse(): Boolean {
+        if (busy) return false
+        val interrupted = interruptedDraftId
+        if (interrupted != null && messages.lastOrNull()?.id == interrupted) {
+            messages = messages.dropLast(1)
+        }
         return beginTurn()
     }
 

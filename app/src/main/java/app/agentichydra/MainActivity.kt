@@ -281,11 +281,14 @@ fun ChatScreen(vm: HydraModel) {
             bottomBar = {
                 Column(Modifier.imePadding().widthIn(max = 840.dp).fillMaxWidth()) {
                     vm.error?.let { error ->
+                        val canContinue = !vm.busy
                         ErrorBanner(
                             error,
                             onDismiss = { vm.error = null },
                             modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
                             contentPadding = PaddingValues(start = 16.dp, top = 8.dp, bottom = 8.dp),
+                            actionLabel = if (canContinue) "Continue" else null,
+                            onAction = if (canContinue) ({ vm.continueResponse() }) else null,
                         )
                     }
                     AnimatedVisibility(

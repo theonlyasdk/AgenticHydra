@@ -123,14 +123,18 @@ class ProjectTools(
         return FileChange(path, before, text)
     }
 
-    private fun walk(path: String): List<Pair<String, DocumentFile>> {
+    private fun walk(
+        path: String,
+        maxFiles: Int = 300,
+        maxDirs: Int = 600,
+    ): List<Pair<String, DocumentFile>> {
         val start = resolve(path)
         require(start.isDirectory) { "Choose a directory." }
         val queue = ArrayDeque<Triple<String, DocumentFile, Int>>()
         queue.add(Triple(path.trim('/'), start, 0))
         val files = mutableListOf<Pair<String, DocumentFile>>()
         var visited = 0
-        while (queue.isNotEmpty() && visited++ < 600 && files.size < 300) {
+        while (queue.isNotEmpty() && visited++ < maxDirs && files.size < maxFiles) {
             if (Thread.currentThread().isInterrupted) throw InterruptedIOException()
             val (prefix, dir, depth) = queue.removeFirst()
             dir.listFiles().sortedBy { it.name }.forEach { child ->
@@ -140,12 +144,35 @@ class ProjectTools(
                     name !in setOf(".git", "node_modules", ".gradle", "build")
                 ) {
                     queue.add(Triple(full, child, depth + 1))
-                } else if (child.isFile && files.size < 300) {
+                } else if (child.isFile && files.size < maxFiles) {
                     files.add(full to child)
                 }
             }
         }
         return files
+    }
+
+    /** A bounded project-wide file index for @ mentions; skips build and cache directories. */
+    fun indexFiles(limit: Int = 2000): List<String> = walk("", maxFiles = limit, maxDirs = 4000).map { it.first }.sorted()
+
+    /** Reads only the tail of a file so live command logs never hit the full-read size limit. */
+    fun readTail(
+        path: String,
+        maxBytes: Int = 8192,
+    ): String {
+        val file = resolve(path)
+        require(file.isFile) { "Choose a file, not a directory." }
+        val length = file.length()
+        val skip = (length - maxBytes).coerceAtLeast(0)
+        return context.contentResolver.openInputStream(file.uri)?.use { stream ->
+            var remaining = skip
+            while (remaining > 0) {
+                val skipped = stream.skip(remaining)
+                if (skipped <= 0) break
+                remaining -= skipped
+            }
+            stream.readBytes().toString(Charsets.UTF_8)
+        }.orEmpty()
     }
 
     fun execute(

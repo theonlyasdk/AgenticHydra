@@ -41,7 +41,9 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
@@ -58,6 +60,7 @@ import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
@@ -808,6 +811,8 @@ data class WorkChatUiState(
     val streamingResponseId: String? = null,
     val activeTasks: Int = 0,
     val context: ContextUsage = ContextUsage(),
+    val fileIndex: List<String> = emptyList(),
+    val fileIndexLoading: Boolean = false,
 )
 
 class WorkChatActions(
@@ -860,6 +865,7 @@ private fun WorkChatRoute(
             saved?.let { vm.usageFor(it.apiHistory) } ?: ContextUsage()
         }
     LaunchedEffect(ContextBudget.tokens) { if (active) vm.refreshContextUsage() }
+    LaunchedEffect(id, vm.projectUri) { if (active) vm.refreshFileIndex() }
     val engineRun = vm.engine.isRunning(id)
     val state =
         if (active) {
@@ -884,6 +890,8 @@ private fun WorkChatRoute(
                 streamingResponseId = vm.streamingId,
                 activeTasks = vm.engine.active.size,
                 context = vm.contextUsage,
+                fileIndex = vm.fileIndex,
+                fileIndexLoading = vm.fileIndexLoading,
             )
         } else {
             WorkChatUiState(
@@ -1117,14 +1125,19 @@ fun WorkChatScreen(
     var menu by remember { mutableStateOf(false) }
     var attachmentMenu by remember { mutableStateOf(false) }
     var searchOpen by rememberSaveable(state.conversationId) { mutableStateOf(false) }
-    val canResumeCancelled =
-        !state.running && state.status == "Cancelled" && draft.isBlank() && state.attachments.isEmpty()
+    val mention = remember(draft) { mentionQuery(draft) }
+    var mentionDismissed by remember { mutableStateOf(false) }
+    LaunchedEffect(mention) { mentionDismissed = false }
+    val showMentions = mention != null && state.hasProject && !mentionDismissed
+    BackHandler(enabled = showMentions) { mentionDismissed = true }
+    val canResume =
+        !state.running && (state.status == "Cancelled" || state.status == "Failed") && draft.isBlank() && state.attachments.isEmpty()
     val canSendMessage =
         state.running ||
             (
                 state.canSend &&
                     !state.attaching &&
-                    (draft.isNotBlank() || state.attachments.isNotEmpty() || canResumeCancelled)
+                    (draft.isNotBlank() || state.attachments.isNotEmpty() || canResume)
             )
     Scaffold(containerColor = cs.background, topBar = {
         TopAppBar(
@@ -1210,7 +1223,12 @@ fun WorkChatScreen(
                 .fillMaxWidth(),
         ) {
             state.error?.let {
-                ErrorBanner(it, onDismiss = actions.onDismissError)
+                ErrorBanner(
+                    it,
+                    onDismiss = actions.onDismissError,
+                    actionLabel = if (!state.running) "Continue" else null,
+                    onAction = if (!state.running) actions.onResume else null,
+                )
                 Spacer(Modifier.height(8.dp))
             }
             AnimatedVisibility(
@@ -1219,6 +1237,17 @@ fun WorkChatScreen(
                 exit = shrinkVertically(spring(stiffness = 520f)) + fadeOut(spring(stiffness = 520f)),
             ) {
                 Column {
+                    if (showMentions) {
+                        mention?.let { active ->
+                            MentionPanel(
+                                paths = state.fileIndex,
+                                query = active.query,
+                                loading = state.fileIndexLoading,
+                                onPick = { path -> onDraft(applyMention(draft, active, path)) },
+                                modifier = Modifier.padding(bottom = 8.dp),
+                            )
+                        }
+                    }
                     Surface(color = cs.surfaceContainer, shape = MaterialTheme.shapes.extraLarge) {
                         Column(Modifier.padding(8.dp)) {
                             if (state.attaching) LinearProgressIndicator(Modifier.fillMaxWidth())
@@ -1302,7 +1331,7 @@ fun WorkChatScreen(
                                     onClick =
                                         when {
                                             state.running -> actions.onStop
-                                            canResumeCancelled -> actions.onResume
+                                            canResume -> actions.onResume
                                             else -> actions.onSend
                                         },
                                     enabled = canSendMessage,
@@ -1311,12 +1340,12 @@ fun WorkChatScreen(
                                     Icon(
                                         when {
                                             state.running -> Icons.Outlined.Stop
-                                            canResumeCancelled -> Icons.Outlined.PlayArrow
+                                            canResume -> Icons.Outlined.PlayArrow
                                             else -> Icons.Outlined.ArrowUpward
                                         },
                                         when {
                                             state.running -> "Stop task"
-                                            canResumeCancelled -> "Resume task"
+                                            canResume -> "Resume task"
                                             else -> "Send task message"
                                         },
                                     )
@@ -1457,11 +1486,39 @@ fun WorkToolEntry(
                 step.tool.startsWith("mcp_notion_")
         }
     val notionPainter = if (notion) painterResource(R.drawable.ic_notion) else null
+    val wait = step.wait
+    val waiting = running && wait != null && step.tool in setOf("wait_for", "wait_until")
+    var waitNow by remember(step.id) { mutableLongStateOf(android.os.SystemClock.elapsedRealtime()) }
+    LaunchedEffect(step.id, waiting) {
+        while (waiting) {
+            waitNow = android.os.SystemClock.elapsedRealtime()
+            delay(100)
+        }
+    }
+    val waitFraction =
+        if (waiting && wait!!.durationMillis > 0) {
+            ((waitNow - wait.startedElapsed).toFloat() / wait.durationMillis).coerceIn(0f, 1f)
+        } else {
+            0f
+        }
+    val waitSeconds =
+        if (waiting) {
+            (((wait!!.durationMillis - (waitNow - wait.startedElapsed)).coerceAtLeast(0) + 999) / 1000).toInt()
+        } else {
+            0
+        }
+    val waitLabel = if (waitSeconds < 60) "${waitSeconds}s" else "${waitSeconds / 60}m ${waitSeconds % 60}s"
+    val rowTitle = if (waiting) "$title · $waitLabel" else title
     Column(Modifier.fillMaxWidth().testTag("work-tool-${steps.first().id}")) {
         Surface(color = cs.background, shape = MaterialTheme.shapes.extraSmall) {
             Row(
                 Modifier
                     .fillMaxWidth()
+                    .drawBehind {
+                        if (waitFraction > 0f) {
+                            drawRect(color = cs.secondaryContainer, size = Size(size.width * waitFraction, size.height))
+                        }
+                    }
                     .clickable { details = true }
                     .padding(vertical = 8.dp),
                 verticalAlignment = Alignment.CenterVertically,
@@ -1498,7 +1555,7 @@ fun WorkToolEntry(
                         )
                     }
                     ShimmerStatusText(
-                        title,
+                        rowTitle,
                         Modifier.weight(1f),
                         style = MaterialTheme.typography.bodySmall,
                         maxLines = 1,
@@ -1532,6 +1589,19 @@ fun WorkToolEntry(
         }
         if (step.tool == "download_file") {
             step.download?.let { DownloadStatusCard(it, running, failed) }
+        }
+        val curlProgress =
+            remember(step.tool, step.output) {
+                if (step.tool == "run_command") parseCurlProgress(step.output) else null
+            }
+        val curlName =
+            remember(step.arguments) {
+                curlTargetName(runCatching { JSONObject(step.arguments).optString("command") }.getOrDefault(""))
+            }
+        if (curlProgress != null) {
+            DownloadStatusCard(curlProgress.copy(path = curlName), running, failed)
+        } else if (running && step.tool in setOf("run_command", "git_status", "git_diff") && step.output.isNotBlank()) {
+            LiveCommandOutput(step.output)
         }
         if (pendingStep != null) {
             Surface(
@@ -1670,6 +1740,28 @@ fun WorkToolEntry(
                 }
             }
         }
+    }
+}
+
+/** Live tail of a running Termux command, like the streaming output in opencode-style harnesses. */
+@Composable
+private fun LiveCommandOutput(output: String) {
+    val cs = MaterialTheme.colorScheme
+    val tail = remember(output) { output.trimEnd().lines().takeLast(8).joinToString("\n") }
+    Surface(
+        color = cs.surfaceContainerLow,
+        shape = MaterialTheme.shapes.large,
+        modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp).testTag("command-live-output"),
+    ) {
+        Text(
+            tail,
+            Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
+            style = MaterialTheme.typography.code,
+            color = cs.onSurfaceVariant,
+            maxLines = 8,
+            softWrap = false,
+            overflow = TextOverflow.Ellipsis,
+        )
     }
 }
 

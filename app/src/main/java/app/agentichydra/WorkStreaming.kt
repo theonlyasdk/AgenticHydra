@@ -128,7 +128,7 @@ internal class WorkStreamTurn(
                         result.rateLimitWaitMillis(provider),
                     )
                 }
-                throw IOException(describeFailure(result.code))
+                throw IOException(describeFailure(result.code, runCatching { result.peekBody(PEEK_LIMIT).string() }.getOrNull()))
             }
             if (rateLimit.prevent) {
                 RequestPacer.noteResponseHeaders(
@@ -178,7 +178,14 @@ internal class WorkStreamTurn(
                         val hint = retryHintFromBody(error?.toString().orEmpty()) ?: defaultRateLimitWait(provider)
                         throw ProviderRateLimitException("Provider rate limit reached.", hint.coerceIn(2_000L, 300_000L))
                     }
-                    throw IOException("The provider reported a streaming error. Check the model and try again.")
+                    val detail = error?.optString("message")?.takeIf { it.isNotBlank() }
+                    throw IOException(
+                        if (detail != null) {
+                            "Provider streaming error: $detail"
+                        } else {
+                            "The provider reported a streaming error. Check the model and try again."
+                        },
+                    )
                 }
 
                 event.optJSONObject("usage")?.let { usage = it }
@@ -297,14 +304,25 @@ internal class WorkStreamTurn(
             detail.contains(INCLUDE_USAGE, ignoreCase = true)
     }
 
-    private fun describeFailure(code: Int): String =
-        when (code) {
-            400, 422 -> "The model rejected this request. Try Default reasoning or choose a compatible model."
-            401, 403 -> "Access denied. Check your API key and model permissions."
-            404 -> "Model or endpoint not found. Check the connection settings."
-            429 -> "Provider limit reached. Wait a moment and try again."
-            else -> "Provider returned HTTP $code. Check this model's tool support, reasoning setting, and connection."
+    private fun describeFailure(
+        code: Int,
+        body: String? = null,
+    ): String {
+        val explanation =
+            when (code) {
+                400, 422 -> "The model rejected this request. Try Default reasoning or choose a compatible model."
+                401, 403 -> "Access denied. Check your API key and model permissions."
+                404 -> "Model or endpoint not found. Check the connection settings."
+                429 -> "Provider limit reached. Wait a moment and try again."
+                else -> httpStatusExplanation(code)
+            }
+        val detail = httpErrorDetail(body)
+        return if (detail != null) {
+            "Provider returned HTTP $code: $detail. $explanation"
+        } else {
+            "Provider returned HTTP $code. $explanation"
         }
+    }
 
     private companion object {
         const val DATA_PREFIX = "data:"

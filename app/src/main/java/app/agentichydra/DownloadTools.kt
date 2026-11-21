@@ -67,7 +67,10 @@ internal class FileDownloader(
                         validateDownloadUrl(target)
                         return@use
                     }
-                    require(result.isSuccessful) { "Download failed with HTTP ${result.code}." }
+                    if (!result.isSuccessful) {
+                        val detail = runCatching { result.peekBody(8192).string() }.getOrNull()
+                        error(describeHttpFailure("Download failed", result.code, detail))
+                    }
                     val body = result.body ?: error("The server returned no file.")
                     val total = body.contentLength().coerceAtLeast(0)
                     val name = downloadFileName(target, result.header("Content-Disposition"))

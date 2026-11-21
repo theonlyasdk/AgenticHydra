@@ -201,11 +201,16 @@ internal fun ErrorBanner(
     onDismiss: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
     contentPadding: PaddingValues = PaddingValues(start = 16.dp),
+    actionLabel: String? = null,
+    onAction: (() -> Unit)? = null,
 ) {
     val cs = MaterialTheme.colorScheme
     Surface(modifier, color = cs.errorContainer, shape = MaterialTheme.shapes.large) {
         Row(Modifier.padding(contentPadding), verticalAlignment = Alignment.CenterVertically) {
             Text(text, Modifier.weight(1f), color = cs.onErrorContainer, style = MaterialTheme.typography.bodyMedium)
+            if (actionLabel != null && onAction != null) {
+                TextButton(onClick = onAction) { Text(actionLabel, color = cs.onErrorContainer) }
+            }
             if (onDismiss != null) {
                 IconButton(onClick = onDismiss) { Icon(Icons.Outlined.Close, "Dismiss error", tint = cs.onErrorContainer) }
             }
