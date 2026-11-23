@@ -684,6 +684,7 @@ class HydraModel(
         quizDecision?.cancel()
         quizDecision = null
         pendingQuiz = null
+        steps = steps.markPendingStepsAs("Cancelled")
         if (messages.lastOrNull()?.let { it.text.isBlank() && it.thought.isBlank() } == true) {
             messages = messages.dropLast(1)
         }
@@ -972,7 +973,7 @@ class HydraModel(
                                 val toolCall = calls.toolCallAt(i)
                                 val name = toolCall.name
                                 val argsText = toolCall.arguments
-                                val step = WorkStep(name, argsText)
+                                val step = WorkStep(name, argsText, state = "Running")
                                 withContext(Dispatchers.Main) {
                                     if (currentGeneration == generation) {
                                         steps = steps + step
@@ -981,6 +982,7 @@ class HydraModel(
                                         persist()
                                     }
                                 }
+                                val started = android.os.SystemClock.elapsedRealtime()
                                 val result =
                                     try {
                                         executeChatTool(name, JSONObject(argsText))
@@ -993,6 +995,7 @@ class HydraModel(
                                     ) {
                                         WorkToolResult("Tool error: ${e.message ?: "Action failed."}", failed = true)
                                     }
+                                keepToolProgressVisible(started)
                                 currentCoroutineContext().ensureActive()
                                 withContext(Dispatchers.Main) {
                                     if (currentGeneration == generation) {
@@ -1056,6 +1059,7 @@ class HydraModel(
                     draftFlushJob = null
                     if (currentGeneration == generation) {
                         // A stop mid-wait must not leave the transient rate-limit notice behind.
+                        steps = steps.markPendingStepsAs("Interrupted")
                         messages = messages.filterNot { it.role == "notice" && isRateLimitNotice(it.text) }
                         if (messages.lastOrNull()?.let { it.text.isBlank() && it.thought.isBlank() } == true) {
                             messages = messages.dropLast(1)

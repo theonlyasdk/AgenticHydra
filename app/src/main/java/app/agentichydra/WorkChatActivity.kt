@@ -1384,7 +1384,7 @@ fun WorkChatScreen(
                 }
             } else {
                 ChatTimeline(
-                    ChatTimelineUiState(state.conversationId, timeline.messages, state.streamingResponseId),
+                    ChatTimelineUiState(state.conversationId, timeline.messages, state.streamingResponseId, state.running),
                     actions.onCopy,
                     actions.onShare,
                     modifier = Modifier.widthIn(max = 760.dp).fillMaxSize(),
@@ -1401,7 +1401,8 @@ fun WorkChatScreen(
                     },
                     trailingContent = {
                         if ((state.running || state.status == "Running" || state.status == "Thinking") &&
-                            state.pendingId == null && state.streamingResponseId == null
+                            state.pendingId == null && state.streamingResponseId == null &&
+                            state.steps.none { it.state == "Running" }
                         ) {
                             BusyStatusRow(
                                 Modifier.fillMaxWidth().padding(top = 20.dp, bottom = 12.dp),
@@ -1517,35 +1518,11 @@ fun WorkToolEntry(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 if (running) {
-                    val pulse by rememberInfiniteTransition(label = "Tool activity").animateFloat(
-                        .8f,
-                        1f,
-                        infiniteRepeatable(tween(700), RepeatMode.Reverse),
-                        label = "Tool icon pulse",
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(20.dp).padding(2.dp),
+                        strokeWidth = 2.dp,
+                        color = cs.primary,
                     )
-                    if (notionPainter != null) {
-                        Icon(
-                            notionPainter,
-                            null,
-                            Modifier.size(16.dp).graphicsLayer {
-                                scaleX = pulse
-                                scaleY = pulse
-                                alpha = pulse
-                            },
-                            tint = cs.primary,
-                        )
-                    } else {
-                        Icon(
-                            icon,
-                            null,
-                            Modifier.size(20.dp).graphicsLayer {
-                                scaleX = pulse
-                                scaleY = pulse
-                                alpha = pulse
-                            },
-                            tint = cs.primary,
-                        )
-                    }
                     ShimmerStatusText(
                         rowTitle,
                         Modifier.weight(1f),

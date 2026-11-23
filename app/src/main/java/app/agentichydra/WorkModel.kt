@@ -1139,7 +1139,8 @@ class WorkModel(
                             val toolCall = toolCalls.toolCallAt(i)
                             val name = toolCall.name
                             val args = toolCall.arguments
-                            val step = WorkStep(name, args)
+                            val needsApproval = ToolPolicy.approval(approvalMode, name)
+                            val step = WorkStep(name, args, state = if (needsApproval) "Waiting" else "Running")
                             if (text.isBlank()) {
                                 progress =
                                     toolLabel(
@@ -1151,7 +1152,7 @@ class WorkModel(
                             steps = steps + step
                             messages = messages + Message("tool", name, id = step.id, createdAt = step.createdAt)
                             val allow =
-                                if (ToolPolicy.approval(approvalMode, name)) {
+                                if (needsApproval) {
                                     val pending = CompletableDeferred<Boolean>()
                                     decision = pending
                                     pendingApproval = step
@@ -1173,16 +1174,20 @@ class WorkModel(
                                     status = "Running $name"
                                     updateStep(step.id, "Running")
                                     checkpoint()
-                                    try {
-                                        executeTool(name, JSONObject(args), step.id)
-                                    } catch (e: CancellationException) {
-                                        throw e
-                                    } catch (e: TermuxOfflineException) {
-                                        termuxPromptId = step.id
-                                        WorkToolResult("Tool error: ${e.message}")
-                                    } catch (e: Exception) {
-                                        WorkToolResult("Tool error: ${e.message ?: "Action failed."}")
-                                    }
+                                    val started = android.os.SystemClock.elapsedRealtime()
+                                    val outcome =
+                                        try {
+                                            executeTool(name, JSONObject(args), step.id)
+                                        } catch (e: CancellationException) {
+                                            throw e
+                                        } catch (e: TermuxOfflineException) {
+                                            termuxPromptId = step.id
+                                            WorkToolResult("Tool error: ${e.message}")
+                                        } catch (e: Exception) {
+                                            WorkToolResult("Tool error: ${e.message ?: "Action failed."}")
+                                        }
+                                    keepToolProgressVisible(started)
+                                    outcome
                                 }
                             currentCoroutineContext().ensureActive()
                             changes = changes + result.changes

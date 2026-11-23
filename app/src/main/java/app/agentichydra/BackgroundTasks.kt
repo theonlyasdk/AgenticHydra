@@ -348,11 +348,12 @@ internal class BackgroundTaskEngine(
                             val toolCall = calls.toolCallAt(i)
                             val name = toolCall.name
                             val argsText = toolCall.arguments
-                            val step = WorkStep(name, argsText)
+                            val step = WorkStep(name, argsText, state = "Running")
                             steps = steps + step
                             messages = messages + Message("tool", name, id = step.id, createdAt = step.createdAt)
                             progress = toolLabel(name, runCatching { JSONObject(argsText) }.getOrDefault(JSONObject()))
                             emit("Running")
+                            val started = android.os.SystemClock.elapsedRealtime()
                             val result =
                                 try {
                                     withContext(Dispatchers.IO) {
@@ -369,6 +370,7 @@ internal class BackgroundTaskEngine(
                                 } catch (e: Exception) {
                                     WorkToolResult("Tool error: ${e.message ?: "Action failed."}", failed = true)
                                 }
+                            keepToolProgressVisible(started)
                             currentCoroutineContext().ensureActive()
                             val state =
                                 if (result.failed || result.output.startsWith("Tool error:")) {

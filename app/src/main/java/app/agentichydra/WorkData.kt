@@ -163,6 +163,12 @@ data class WaitProgress(
     }
 }
 
+// Keep fast operations visible long enough for the running row to render.
+internal suspend fun keepToolProgressVisible(started: Long) {
+    val remaining = 120L - (android.os.SystemClock.elapsedRealtime() - started)
+    if (remaining > 0L) kotlinx.coroutines.delay(remaining)
+}
+
 data class WorkStep(
     val tool: String,
     val arguments: String,

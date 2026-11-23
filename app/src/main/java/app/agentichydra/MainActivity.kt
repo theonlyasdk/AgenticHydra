@@ -459,7 +459,8 @@ fun ChatScreen(vm: HydraModel) {
                         ChatTimelineUiState(
                             vm.activeId,
                             vm.messages,
-                            if (vm.busy) vm.messages.lastOrNull()?.id else null,
+                            if (vm.busy) vm.messages.lastOrNull()?.takeIf { it.role == "assistant" }?.id else null,
+                            running = vm.busy,
                         ),
                         onCopy = { message ->
                             clipboard.setText(AnnotatedString(message.text))
@@ -478,7 +479,7 @@ fun ChatScreen(vm: HydraModel) {
                             }
                         },
                         trailingContent = {
-                            if (vm.busy && vm.messages.lastOrNull()?.role == "tool") {
+                            if (vm.busy && vm.messages.lastOrNull()?.role == "tool" && vm.steps.none { it.state == "Running" }) {
                                 BusyStatusRow(Modifier.padding(vertical = 12.dp), spacing = 12.dp) {
                                     ShimmerStatusText(
                                         "Working…",

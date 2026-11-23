@@ -20,7 +20,6 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
-import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.interaction.collectIsDraggedAsState
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -68,6 +67,7 @@ data class ChatTimelineUiState(
     val conversationId: String,
     val messages: List<Message>,
     val streamingResponseId: String? = null,
+    val running: Boolean = streamingResponseId != null,
 )
 
 internal fun chatTimeMarkerIds(messages: List<Message>): Set<String> {
@@ -132,7 +132,7 @@ fun ChatTimeline(
     val activeMatch = if (matches.isEmpty()) -1 else cursor.coerceIn(0, matches.lastIndex)
     // While tokens stream in, keep the growing tail a couple of lines clear of the composer.
     val tailClearance by animateDpAsState(
-        targetValue = if (state.streamingResponseId != null) 64.dp else 16.dp,
+        targetValue = if (state.running) 64.dp else 16.dp,
         animationSpec = spring(stiffness = 520f),
         label = "Streaming tail clearance",
     )
@@ -229,9 +229,9 @@ fun ChatTimeline(
                 }
             }
         }
-    val streaming by rememberUpdatedState(state.streamingResponseId != null)
     val searching by rememberUpdatedState(searchOpen)
     LaunchedEffect(listState, state.conversationId) {
+        var initialPosition = true
         snapshotFlow {
             val layout = listState.layoutInfo
             val last = layout.visibleItemsInfo.lastOrNull()
@@ -245,36 +245,40 @@ fun ChatTimeline(
                 layout.viewportEndOffset,
             )
         }.collect { tail ->
-            if (!tail.following || tail.dragging || tail.scrolling || tail.count == 0 || !listState.canScrollForward) {
-                return@collect
-            }
+            if (!tail.following || tail.dragging || tail.scrolling || tail.count == 0) return@collect
+            val positionOnOpen = initialPosition
+            initialPosition = false
+            if (!listState.canScrollForward) return@collect
+
             launch {
                 val motionScale = coroutineContext[MotionDurationScale]?.scaleFactor ?: 1f
-                if (!streaming || motionScale == 0f) {
-                    withFrameNanos { }
-                    if (following && !searching && !dragging && !listState.isScrollInProgress && listState.canScrollForward) {
+                if (positionOnOpen || motionScale == 0f) {
+                    if (following && !searching && !dragging && !listState.isScrollInProgress) {
                         listState.scrollToItem(listState.layoutInfo.totalItemsCount - 1, 100_000)
                     }
                     return@launch
                 }
 
-                var previousFrame = withFrameNanos { it }
-                while (following && !searching && !dragging && !listState.isScrollInProgress && listState.canScrollForward) {
-                    val frame = withFrameNanos { it }
-                    if (!following || searching || dragging || listState.isScrollInProgress) break
-                    val layout = listState.layoutInfo
-                    val last = layout.visibleItemsInfo.lastOrNull() ?: break
-                    val remaining = if (last.index == layout.totalItemsCount - 1) {
-                        last.offset + last.size + layout.afterContentPadding - layout.viewportEndOffset
-                    } else {
-                        layout.viewportSize.height
+                // One scroll session follows the measured tail until it settles or a drag takes over.
+                listState.scroll {
+                    var previousFrame = withFrameNanos { it }
+                    while (following && !searching && !dragging && listState.canScrollForward) {
+                        val frame = withFrameNanos { it }
+                        if (!following || searching || dragging) break
+                        val layout = listState.layoutInfo
+                        val last = layout.visibleItemsInfo.lastOrNull() ?: break
+                        val remaining = if (last.index == layout.totalItemsCount - 1) {
+                            last.offset + last.size + layout.afterContentPadding - layout.viewportEndOffset
+                        } else {
+                            layout.viewportSize.height
+                        }
+                        if (remaining <= 0) break
+                        val elapsed = ((frame - previousFrame) / 1_000_000.0).coerceAtMost(40.0)
+                        val fraction = 1 - exp(-elapsed / (55.0 * motionScale))
+                        val step = (remaining * fraction).toFloat().coerceIn(1f, remaining.toFloat())
+                        previousFrame = frame
+                        if (scrollBy(step) == 0f) break
                     }
-                    if (remaining <= 0) break
-                    val elapsed = (frame - previousFrame) / 1_000_000.0
-                    val fraction = 1 - exp(-elapsed / (55.0 * motionScale))
-                    val step = (remaining * fraction).toFloat().coerceIn(1f, remaining.toFloat())
-                    previousFrame = frame
-                    if (listState.scrollBy(step) == 0f) break
                 }
             }.join()
         }
