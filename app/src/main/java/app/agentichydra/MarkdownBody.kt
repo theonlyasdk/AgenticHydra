@@ -1,24 +1,32 @@
 package app.agentichydra
 
 import android.content.res.Configuration
+import android.animation.ValueAnimator
+import android.os.SystemClock
 import android.text.Layout
 import android.text.Spannable
 import android.text.Spanned
 import android.text.TextPaint
 import android.text.method.LinkMovementMethod
 import android.text.style.CharacterStyle
+import android.text.style.UpdateAppearance
 import android.util.TypedValue
 import android.widget.TextView
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.CubicBezierEasing
+import androidx.compose.animation.core.spring
 import androidx.compose.foundation.*
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalDensity
@@ -111,39 +119,7 @@ object MarkdownSections {
     }
 }
 
-private const val TOKEN_FADE_MAX_CHARS = 96
-private const val FADE_MIN_ALPHA = 0.25f
-private const val FADE_BUCKETS = 8
-
-/** Ease-out curve for the fade: bright immediately, then settle gently instead of ramping linearly. */
-private val FADE_EASING = CubicBezierEasing(0.2f, 0f, 0f, 1f)
-
-/** Roughly how many characters a settle covers at a given duration, so longer fades travel further. */
-private fun fadeWidth(millis: Int): Int =
-    (millis / 1000f * 150f).roundToInt().coerceIn(FADE_BUCKETS, TOKEN_FADE_MAX_CHARS)
-
-private class StreamGrowth(
-    var text: String = "",
-)
-
-/** Characters appended since the previous frame of a live stream, so only new tokens fade in. */
-@Composable
-private fun rememberAppendedChars(
-    text: String,
-    streaming: Boolean,
-): Int {
-    val growth = remember { StreamGrowth() }
-    return remember(text, streaming) {
-        val previous = growth.text
-        growth.text = text
-        when {
-            !streaming || text.isEmpty() -> 0
-            previous.isEmpty() -> text.length
-            text.length > previous.length && text.startsWith(previous) -> text.length - previous.length
-            else -> 0
-        }
-    }.coerceAtMost(TOKEN_FADE_MAX_CHARS)
-}
+private val ResponseFadeEasing = CubicBezierEasing(0.2f, 0f, 0f, 1f)
 
 @Composable
 fun MarkdownBody(
@@ -151,9 +127,11 @@ fun MarkdownBody(
     modifier: Modifier = Modifier,
     highlight: ChatHighlight? = null,
     streaming: Boolean = false,
+    streamChunkStarts: List<Int> = emptyList(),
 ) {
     val sections = remember(text) { MarkdownSections.parse(text) }
-    val appended = rememberAppendedChars(text, streaming)
+    val animate = LocalResponseFade.current && ValueAnimator.areAnimatorsEnabled()
+    val bufferStart = if (animate && streaming) streamChunkStarts.firstOrNull() else null
     val cs = MaterialTheme.colorScheme
     val palette = rememberMatchPalette()
     val renderer = rememberMarkdownRenderer(MaterialTheme.typography.bodyLarge)
@@ -191,11 +169,35 @@ fun MarkdownBody(
                                     style = MaterialTheme.typography.labelMedium,
                                     modifier = Modifier.weight(1f),
                                 )
-                                TextButton(onClick = {
-                                    clipboard.setText(AnnotatedString(section.text))
-                                    copied = true
-                                }) {
-                                    Icon(Icons.Outlined.ContentCopy, null, Modifier.size(16.dp))
+                                val buttonColor by animateColorAsState(
+                                    if (copied) cs.successContainer else Color.Transparent,
+                                    animationSpec = spring(stiffness = 600f),
+                                    label = "Copy button background",
+                                )
+                                val iconColor by animateColorAsState(
+                                    if (copied) cs.onSuccessContainer else cs.primary,
+                                    animationSpec = spring(stiffness = 600f),
+                                    label = "Copy button foreground",
+                                )
+                                TextButton(
+                                    onClick = {
+                                        clipboard.setText(AnnotatedString(section.text))
+                                        copied = true
+                                    },
+                                    modifier = Modifier.animateContentSize(
+                                        animationSpec = spring(stiffness = 600f),
+                                        alignment = Alignment.CenterEnd,
+                                    ),
+                                    colors = ButtonDefaults.textButtonColors(
+                                        containerColor = buttonColor,
+                                        contentColor = iconColor,
+                                    ),
+                                ) {
+                                    Icon(
+                                        if (copied) Icons.Outlined.Check else Icons.Outlined.ContentCopy,
+                                        null,
+                                        Modifier.size(16.dp),
+                                    )
                                     Spacer(Modifier.width(8.dp))
                                     Text(if (copied) "Copied" else "Copy")
                                 }
@@ -224,11 +226,24 @@ fun MarkdownBody(
                         remember(section.text, renderer, query, active, palette) {
                             highlightSpans(renderer.render(section.text.trim('\n', '\r')), query, active, palette)
                         }
+                    val live = streaming && sectionIndex == sections.lastIndex
+                    val revealThrough = remember(bufferStart, text, section.text, rendered, renderer, live) {
+                        val sectionStart = if (live && bufferStart != null) text.lastIndexOf(section.text) else -1
+                        val offset = if (sectionStart >= 0 && bufferStart != null) bufferStart - sectionStart else section.text.length
+                        when {
+                            offset <= 0 -> 0
+                            offset >= section.text.length -> rendered.length
+                            else -> renderer.render(section.text.take(offset).trim('\n', '\r'))
+                                .toString().commonPrefixWith(rendered.toString()).length
+                        }
+                    }
                     MarkdownText(
                         rendered,
                         renderer,
                         Modifier.fillMaxWidth(),
-                        fadeChars = if (sectionIndex == sections.lastIndex) appended else 0,
+                        revealThrough = revealThrough,
+                        streaming = live,
+                        animate = animate,
                     )
                 }
             }
@@ -305,47 +320,139 @@ private fun MarkdownTable(
     }
 }
 
-/** Fades the newest characters of a live stream; the rest of the paragraph stays at full opacity. */
-private class FadeSpan : CharacterStyle() {
-    var alpha = 1f
-
+/** Draw-only spans keep unrevealed glyphs in the measured text layout. */
+internal class FadeSpan(var alpha: Float = 0f) : CharacterStyle(), UpdateAppearance {
     override fun updateDrawState(tp: TextPaint) {
-        tp.alpha = (tp.alpha * alpha).roundToInt().coerceIn(0, 255)
+        tp.alpha = (tp.alpha * alpha).roundToInt()
+        if (tp.bgColor != 0) {
+            val backgroundAlpha = (android.graphics.Color.alpha(tp.bgColor) * alpha).roundToInt()
+            tp.bgColor = (tp.bgColor and 0x00ffffff) or (backgroundAlpha shl 24)
+        }
     }
 }
 
-/**
- * Keeps the newest characters of a stream in a soft, eased gradient. The fade is positional rather
- * than a restart-from-zero animation, so a burst of tokens never blinks: text flows in while the
- * newest glyphs are faint, and the gradient lifts to full opacity once that burst settles.
- */
-private class TailFade {
-    var view: TextView? = null
-    var spannable: Spannable? = null
-    private val spans = List(FADE_BUCKETS) { FadeSpan() }
-    private var owner: Spannable? = null
+internal class ResponseReveal {
+    private class Range(
+        val start: Int,
+        var end: Int,
+        val releaseAt: Long,
+        var started: Long? = null,
+        val span: FadeSpan = FadeSpan(),
+    )
 
-    /** Replaces the tail spans of [owner] with [chars] characters eased from faint to full. */
-    fun draw(owner: Spannable, chars: Int, flat: Float) {
-        if (this.owner !== owner) {
-            this.owner?.let { previous -> spans.forEach(previous::removeSpan) }
-            this.owner = owner
+    private var owner: Spannable? = null
+    private var previous = ""
+    private var wasStreaming = false
+    private var lastCutoff = -1
+    private val ranges = mutableListOf<Range>()
+
+    fun update(text: Spannable, streaming: Boolean, cutoff: Int, animate: Boolean, now: Long, millis: Int) {
+        val current = text.toString()
+        if (!animate || (!streaming && !wasStreaming && ranges.isEmpty())) {
+            clear()
+            previous = current
+            wasStreaming = false
+            return
         }
-        spans.forEach(owner::removeSpan)
-        if (chars <= 0 || owner.isEmpty()) return
-        val end = owner.length
-        val start = (end - chars).coerceAtLeast(0)
-        val length = end - start
-        if (length <= 0) return
-        val buckets = minOf(FADE_BUCKETS, length)
-        for (index in 0 until buckets) {
-            val from = start + length * index / buckets
-            val to = start + length * (index + 1) / buckets
-            val eased = FADE_EASING.transform((to - start).toFloat() / length)
-            val gradient = FADE_MIN_ALPHA + (1f - FADE_MIN_ALPHA) * eased
-            spans[index].alpha = gradient + (1f - gradient) * flat
-            owner.setSpan(spans[index], from, to, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+        if (owner === text && current == previous && streaming == wasStreaming && cutoff == lastCutoff) return
+
+        val overlap = previous.commonPrefixWith(current).length
+        val wasVisibleThrough = ranges.firstOrNull { it.started == null }?.start ?: previous.length
+        owner?.let { old -> ranges.forEach { old.removeSpan(it.span) } }
+        owner = text
+        ranges.removeAll { it.start >= overlap }
+        ranges.lastOrNull()?.let { it.end = minOf(it.end, overlap) }
+
+        // Markdown can rewrite a rendered paragraph when a closing marker arrives.
+        val newStart = maxOf(overlap, minOf(wasVisibleThrough, text.length))
+        if (newStart < text.length) {
+            ranges += Range(newStart, text.length, now + millis.coerceAtMost(90))
         }
+        // Start the first visible answer immediately after the thinking state.
+        val revealThrough = if (streaming && previous.isNotEmpty()) safeBoundary(text, cutoff) else text.length
+        val index = ranges.indexOfFirst { it.started == null && revealThrough > it.start && revealThrough < it.end }
+        if (index >= 0) {
+            val pending = ranges[index]
+            ranges.add(index + 1, Range(revealThrough, pending.end, pending.releaseAt))
+            pending.end = revealThrough
+        }
+        ranges.forEach { range ->
+            if (range.end <= revealThrough && range.started == null) range.started = now
+            text.setSpan(range.span, range.start, range.end, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+        }
+        previous = current
+        wasStreaming = streaming
+        lastCutoff = cutoff
+        tick(now, millis)
+    }
+
+    fun tick(now: Long, millis: Int): Boolean {
+        val text = owner ?: return false
+        ranges.removeAll { range ->
+            if (range.started == null && now >= range.releaseAt) range.started = range.releaseAt
+            val started = range.started ?: return@removeAll false
+            val progress = ((now - started).toFloat() / millis.coerceAtLeast(1)).coerceIn(0f, 1f)
+            val alpha = ResponseFadeEasing.transform(progress)
+            if (progress >= 1f) {
+                text.removeSpan(range.span)
+            } else if (alpha != range.span.alpha) {
+                text.removeSpan(range.span)
+                range.span.alpha = alpha
+                text.setSpan(range.span, range.start, range.end, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+            }
+            progress >= 1f
+        }
+        return ranges.isNotEmpty()
+    }
+
+    private fun clear() {
+        owner?.let { text -> ranges.forEach { text.removeSpan(it.span) } }
+        ranges.clear()
+        owner = null
+        lastCutoff = -1
+    }
+
+    private fun safeBoundary(text: Spannable, cutoff: Int): Int {
+        val offset = cutoff.coerceIn(0, text.length)
+        if (offset == 0 || offset == text.length) return offset
+        val graphemes = android.icu.text.BreakIterator.getCharacterInstance().apply { setText(text.toString()) }
+        val boundary = if (graphemes.isBoundary(offset)) offset else graphemes.preceding(offset).coerceAtLeast(0)
+        return text.getSpans(boundary, boundary, android.text.style.ReplacementSpan::class.java)
+            .filter { text.getSpanStart(it) < boundary && text.getSpanEnd(it) > boundary }
+            .map(text::getSpanStart)
+            .fold(boundary, ::minOf)
+    }
+}
+
+/** Drives the fade after AndroidView has installed the spans, including when the stream pauses. */
+internal class StreamingMarkdownView(context: android.content.Context) : TextView(context) {
+    private val reveal = ResponseReveal()
+    private var fadeMillis = 0
+    private val revealFrame = object : Runnable {
+        override fun run() {
+            val pending = reveal.tick(SystemClock.uptimeMillis(), fadeMillis)
+            invalidate()
+            if (pending && isAttachedToWindow) postOnAnimation(this)
+        }
+    }
+
+    fun updateReveal(streaming: Boolean, cutoff: Int, animate: Boolean, millis: Int) {
+        fadeMillis = millis
+        (text as? Spannable)?.let {
+            reveal.update(it, streaming, cutoff, animate, SystemClock.uptimeMillis(), fadeMillis)
+        }
+        removeCallbacks(revealFrame)
+        revealFrame.run()
+    }
+
+    override fun onAttachedToWindow() {
+        super.onAttachedToWindow()
+        revealFrame.run()
+    }
+
+    override fun onDetachedFromWindow() {
+        removeCallbacks(revealFrame)
+        super.onDetachedFromWindow()
     }
 }
 
@@ -355,21 +462,19 @@ private fun MarkdownText(
     renderer: MarkdownRenderer,
     modifier: Modifier = Modifier,
     color: Int = renderer.foreground,
-    fadeChars: Int = 0,
+    revealThrough: Int = rendered.length,
+    streaming: Boolean = false,
+    animate: Boolean = false,
 ) {
-    val fadeEnabled = LocalResponseFade.current
     val fadeMillis = LocalResponseFadeMillis.current
-    val fade = remember { TailFade() }
-    val tail = if (fadeEnabled && fadeChars > 0) fadeWidth(fadeMillis) else 0
     AndroidView(factory = { context ->
-        TextView(context)
-            .apply {
-                includeFontPadding = false
-                setPadding(0, 0, 0, 0)
-                setLineSpacing(0f, 1f)
-                setTextIsSelectable(true)
-                movementMethod = LinkMovementMethod.getInstance()
-            }.also { view -> fade.view = view }
+        StreamingMarkdownView(context).apply {
+            includeFontPadding = false
+            setPadding(0, 0, 0, 0)
+            setLineSpacing(0f, 1f)
+            setTextIsSelectable(true)
+            movementMethod = LinkMovementMethod.getInstance()
+        }
     }, modifier = modifier, update = { view ->
         val signature = rendered to color
         if (view.tag != signature) {
@@ -380,28 +485,8 @@ private fun MarkdownText(
             renderer.markwon.setParsedMarkdown(view, rendered)
             view.tag = signature
         }
-        val spannable = view.text as? Spannable
-        fade.spannable = spannable
-        if (spannable != null) {
-            fade.draw(spannable, tail, flat = 0f)
-            view.invalidate()
-        }
+        view.updateReveal(streaming, revealThrough, animate, fadeMillis)
     })
-    // Let a burst settle to full opacity; a new burst restarts this and re-softens the tail.
-    LaunchedEffect(rendered, tail, fadeEnabled, fadeMillis) {
-        if (tail <= 0) return@LaunchedEffect
-        val textView = fade.view ?: return@LaunchedEffect
-        val started = withFrameNanos { it }
-        while (true) {
-            val frame = withFrameNanos { it }
-            val elapsed = (frame - started) / 1_000_000f
-            val progress = (elapsed / fadeMillis).coerceIn(0f, 1f)
-            val spannable = fade.spannable ?: break
-            fade.draw(spannable, tail, flat = FADE_EASING.transform(progress))
-            textView.invalidate()
-            if (progress >= 1f) break
-        }
-    }
 }
 
 @Preview(name = "Markdown light")

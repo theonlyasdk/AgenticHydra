@@ -1,6 +1,13 @@
 package app.agentichydra.mcp
 
+import android.animation.ValueAnimator
 import android.content.Context
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import app.agentichydra.R
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -22,6 +29,7 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
@@ -39,7 +47,7 @@ import androidx.compose.material.icons.outlined.Key
 import androidx.compose.material.icons.outlined.Link
 import androidx.compose.material.icons.outlined.Lock
 import androidx.compose.material.icons.outlined.Login
-import androidx.compose.material.icons.outlined.MoreVert
+import androidx.compose.material.icons.outlined.MoreHoriz
 import androidx.compose.material.icons.outlined.Palette
 import androidx.compose.material.icons.outlined.Payments
 import androidx.compose.material.icons.outlined.Refresh
@@ -54,8 +62,6 @@ import androidx.compose.material3.AssistChip
 import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.FilterChip
@@ -72,28 +78,39 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import app.agentichydra.HydraApplication
 import app.agentichydra.HydraTheme
+import app.agentichydra.HydraMenuItem
+import app.agentichydra.HydraOverflowMenu
+import app.agentichydra.horizontalFadingEdges
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -310,7 +327,7 @@ private fun McpSettingsContent(
                     tint = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 Text(
-                    "MCP tools run with the access you grant. Read-only tools run automatically; everything else asks first.",
+                    "Read-only tools run automatically. Other tools ask for approval.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -330,20 +347,14 @@ private fun EmptyServers(
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center,
     ) {
-        Surface(shape = CircleShape, color = cs.primaryContainer) {
-            Icon(
-                Icons.Outlined.Hub,
-                null,
-                Modifier.size(64.dp).padding(16.dp),
-                tint = cs.onPrimaryContainer,
-            )
-        }
+        AnimatedServerIcon()
         Spacer(Modifier.height(20.dp))
         Text("Bring your tools with you", style = MaterialTheme.typography.headlineSmall)
         Text(
-            "Connect Notion or another MCP server. Hydra discovers its tools and the agent can use them in Work — with your approval.",
+            "Connect a server to use its tools in Work.",
             style = MaterialTheme.typography.bodyMedium,
             color = cs.onSurfaceVariant,
+            textAlign = TextAlign.Center,
             modifier = Modifier.padding(top = 8.dp).widthIn(max = 420.dp),
         )
         Spacer(Modifier.height(24.dp))
@@ -360,11 +371,50 @@ private fun EmptyServers(
         )
         Spacer(Modifier.height(16.dp))
         Text(
-            "You sign in on the provider's own page; Hydra never sees your password.",
+            "Sign in on the provider?s own site.",
+            textAlign = TextAlign.Center,
             style = MaterialTheme.typography.bodySmall,
             color = cs.onSurfaceVariant,
             modifier = Modifier.widthIn(max = 420.dp),
         )
+    }
+}
+
+@Composable
+private fun AnimatedServerIcon() {
+    val cs = MaterialTheme.colorScheme
+    val motionEnabled = ValueAnimator.areAnimatorsEnabled()
+    val intro = remember { Animatable(if (motionEnabled) 0f else 1f) }
+    var entered by remember { mutableStateOf(!motionEnabled) }
+    LaunchedEffect(motionEnabled) {
+        if (motionEnabled) intro.animateTo(1f, tween(durationMillis = 220))
+        entered = true
+    }
+    val rotation = if (motionEnabled && entered) {
+        rememberInfiniteTransition(label = "Server icon").animateFloat(
+            initialValue = 0f,
+            targetValue = 360f,
+            animationSpec = infiniteRepeatable(tween(durationMillis = 18_000, easing = LinearEasing)),
+            label = "Server icon rotation",
+        )
+    } else {
+        null
+    }
+    Surface(
+        modifier = Modifier.size(64.dp).graphicsLayer { alpha = intro.value },
+        shape = CircleShape,
+        color = cs.primaryContainer,
+    ) {
+        Box(contentAlignment = Alignment.Center) {
+            Icon(
+                Icons.Outlined.Hub,
+                null,
+                Modifier.size(32.dp).graphicsLayer {
+                    rotationZ = -180f * (1f - intro.value) + (rotation?.value ?: 0f)
+                },
+                tint = cs.onPrimaryContainer,
+            )
+        }
     }
 }
 
@@ -376,10 +426,41 @@ private fun SuggestedServers(
 ) {
     val available = suggestedServers.filter { it.url.trimEnd('/') !in existingUrls }
     if (available.isEmpty()) return
+    val repeated = available.size > 1
+    val midpoint = Int.MAX_VALUE / 2
+    val start = if (repeated) midpoint - midpoint % available.size else 0
+    val rowState = rememberLazyListState(initialFirstVisibleItemIndex = start)
+    val speed = with(LocalDensity.current) { 24.dp.toPx() }
+    val motionEnabled = ValueAnimator.areAnimatorsEnabled()
+    LaunchedEffect(rowState, repeated, speed, motionEnabled) {
+        if (!repeated || !motionEnabled) return@LaunchedEffect
+        while (true) {
+            snapshotFlow { rowState.isScrollInProgress }.first { !it }
+            delay(1200)
+            if (rowState.isScrollInProgress) continue
+            launch {
+                rowState.scroll {
+                    var previousFrame = withFrameNanos { it }
+                    while (true) {
+                        val frame = withFrameNanos { it }
+                        val seconds = (frame - previousFrame).coerceAtMost(40_000_000L) / 1_000_000_000f
+                        scrollBy(speed * seconds)
+                        previousFrame = frame
+                    }
+                }
+            }.join()
+        }
+    }
+    val background = MaterialTheme.colorScheme.background
     Column(modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text("Suggested", style = MaterialTheme.typography.labelLarge)
-        LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            items(available, key = { it.url }) { suggestion ->
+        LazyRow(
+            state = rowState,
+            modifier = Modifier.fillMaxWidth().then(if (repeated) Modifier.horizontalFadingEdges(background) else Modifier),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            items(count = if (repeated) Int.MAX_VALUE else 1) { index ->
+                val suggestion = available[index % available.size]
                 AssistChip(
                     onClick = { onPick(suggestion) },
                     label = { Text(suggestion.name) },
@@ -467,25 +548,17 @@ private fun McpServerCard(
                 }
                 Box {
                     IconButton(onClick = { menu = true }) {
-                        Icon(Icons.Outlined.MoreVert, "Server options", tint = cs.onSurfaceVariant)
+                        Icon(Icons.Outlined.MoreHoriz, "Server options", tint = cs.onSurfaceVariant)
                     }
-                    DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
-                        DropdownMenuItem(
-                            text = { Text("Reconnect") },
-                            leadingIcon = { Icon(Icons.Outlined.Refresh, null) },
-                            onClick = {
-                                menu = false
-                                onConnect()
-                            },
-                        )
-                        DropdownMenuItem(
-                            text = { Text("Remove") },
-                            leadingIcon = { Icon(Icons.Outlined.DeleteOutline, null) },
-                            onClick = {
-                                menu = false
-                                onRemove()
-                            },
-                        )
+                    HydraOverflowMenu(expanded = menu, onDismiss = { menu = false }) {
+                        HydraMenuItem("Reconnect", Icons.Outlined.Refresh) {
+                            menu = false
+                            onConnect()
+                        }
+                        HydraMenuItem("Remove", Icons.Outlined.DeleteOutline) {
+                            menu = false
+                            onRemove()
+                        }
                     }
                 }
             }

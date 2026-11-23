@@ -1,11 +1,18 @@
 package app.agentichydra
 
+import android.animation.ValueAnimator
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
@@ -40,12 +47,17 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import kotlin.math.PI
+import kotlin.math.cos
+import kotlin.math.sin
 
 /** Title row shared by every sheet and settings card. */
 @Composable
@@ -178,6 +190,57 @@ internal fun ThinkingIndicator(
 
         ThinkingAnimation.SPINNER ->
             CircularProgressIndicator(modifier.size(size), strokeWidth = 2.dp)
+
+        ThinkingAnimation.DOTS, ThinkingAnimation.PULSE, ThinkingAnimation.ORBIT ->
+            AnimatedThinkingMark(animation, modifier.size(size))
+    }
+}
+
+@Composable
+private fun AnimatedThinkingMark(animation: ThinkingAnimation, modifier: Modifier) {
+    val color = MaterialTheme.colorScheme.primary
+    val transition = if (ValueAnimator.areAnimatorsEnabled()) {
+        rememberInfiniteTransition(label = "Thinking mark").animateFloat(
+            initialValue = 0f,
+            targetValue = 1f,
+            animationSpec = infiniteRepeatable(tween(1200, easing = LinearEasing)),
+            label = "Thinking cycle",
+        )
+    } else {
+        null
+    }
+    Canvas(modifier) {
+        val phase = transition?.value ?: 0f
+        val unit = size.minDimension
+        when (animation) {
+            ThinkingAnimation.DOTS -> repeat(3) { index ->
+                val cycle = (phase + 1f - index * 0.16f) % 1f
+                val lift = if (transition != null && cycle < 0.5f) sin((cycle * 2 * PI)).toFloat() else 0f
+                drawCircle(
+                    color,
+                    radius = unit * 0.105f,
+                    center = center + Offset((index - 1) * unit * 0.31f, -lift * unit * 0.21f),
+                )
+            }
+
+            ThinkingAnimation.PULSE -> {
+                drawCircle(color, radius = unit * 0.14f)
+                drawCircle(
+                    color,
+                    radius = unit * (0.23f + phase * 0.20f),
+                    alpha = 1f - phase,
+                    style = Stroke(width = unit * 0.085f),
+                )
+            }
+
+            ThinkingAnimation.ORBIT -> repeat(2) { index ->
+                val angle = (phase * 2 + index) * PI
+                val offset = Offset(cos(angle).toFloat(), sin(angle).toFloat()) * (unit * 0.31f)
+                drawCircle(color, radius = unit * if (index == 0) 0.13f else 0.095f, center = center + offset)
+            }
+
+            ThinkingAnimation.BLOB, ThinkingAnimation.SPINNER -> Unit
+        }
     }
 }
 

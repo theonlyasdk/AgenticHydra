@@ -920,6 +920,7 @@ class WorkModel(
 
                         // The draft message is created lazily on the first streamed chunk,
                         // so no duplicate "Thinking…" indicator is shown while waiting.
+                        val chunks = StreamChunkTail()
                         var streamText = ""
                         var streamThought = ""
                         val response =
@@ -1018,13 +1019,13 @@ class WorkModel(
                                             modelId,
                                             modelName,
                                             providerName,
-                                            streamText,
-                                            thoughtSnapshot,
+                                            chunks.snapshot(streamText, thoughtSnapshot),
                                         )
                                     },
                                 ) { snapshot ->
                                     streamText = snapshot
-                                    publishDraft(current, modelId, modelName, providerName, snapshot, streamThought)
+                                    chunks.append(snapshot)
+                                    publishDraft(current, modelId, modelName, providerName, chunks.snapshot(snapshot, streamThought))
                                 }.run()
                             }
                         currentCoroutineContext().ensureActive()
@@ -1269,8 +1270,7 @@ class WorkModel(
 
     private var thinkingJob: Job? = null
     private var lastDraftPush = 0L
-    private var pendingDraftText: String? = null
-    private var pendingDraftThought: String? = null
+    private var pendingDraft: StreamDraft? = null
     private var draftFlushJob: Job? = null
 
     private fun startThinkingCycle(initial: String? = null) {
@@ -1303,8 +1303,7 @@ class WorkModel(
         modelId: String,
         modelName: String,
         providerName: String,
-        text: String,
-        thought: String = "",
+        draft: StreamDraft,
     ) {
         if (generation != runGeneration) return
         stopThinkingCycle()
@@ -1314,18 +1313,15 @@ class WorkModel(
             draftFlushJob?.cancel()
             draftFlushJob = null
             lastDraftPush = now
-            dispatchDraft(generation, modelId, modelName, providerName, text, thought)
+            dispatchDraft(generation, modelId, modelName, providerName, draft)
         } else {
-            pendingDraftText = text
-            pendingDraftThought = thought
+            pendingDraft = draft
             if (draftFlushJob?.isActive != true) {
                 draftFlushJob =
                     viewModelScope.launch {
                         delay(32L)
-                        val pText = pendingDraftText ?: text
-                        val pThought = pendingDraftThought ?: thought
                         lastDraftPush = android.os.SystemClock.elapsedRealtime()
-                        dispatchDraft(generation, modelId, modelName, providerName, pText, pThought)
+                        dispatchDraft(generation, modelId, modelName, providerName, pendingDraft ?: draft)
                     }
             }
         }
@@ -1336,14 +1332,14 @@ class WorkModel(
         modelId: String,
         modelName: String,
         providerName: String,
-        text: String,
-        thought: String,
+        draft: StreamDraft,
     ) {
         withContext(Dispatchers.Main) {
             if (generation != runGeneration) return@withContext
+            val (text, thought, chunkStarts) = draft
             val id = streamDraftId
             if (id == null) {
-                val draft =
+                val message =
                     Message(
                         "assistant",
                         text,
@@ -1351,16 +1347,17 @@ class WorkModel(
                         modelName = modelName,
                         providerName = providerName,
                         thought = thought,
+                        streamChunkStarts = chunkStarts,
                         finalResponse = false,
                     )
-                streamDraftId = draft.id
-                streamingId = draft.id
-                messages = messages + draft
+                streamDraftId = message.id
+                streamingId = message.id
+                messages = messages + message
             } else {
                 messages =
                     messages.map {
                         if (it.id == id) {
-                            it.copy(text = text, thought = thought, finalResponse = false)
+                            it.copy(text = text, thought = thought, finalResponse = false, streamChunkStarts = chunkStarts)
                         } else {
                             it
                         }

@@ -4,17 +4,12 @@ import android.animation.ValueAnimator
 import android.os.Bundle
 import android.provider.OpenableColumns
 import android.view.animation.DecelerateInterpolator
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.core.spring
-import androidx.compose.animation.expandVertically
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.*
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -23,7 +18,6 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.outlined.NoteAdd
 import androidx.compose.material.icons.outlined.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -40,14 +34,21 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.MainScope
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 class MainActivity : ComponentActivity() {
+    private val updateDialog = mutableStateOf<UpdateDialogState?>(null)
+    private val launchCheckScope = MainScope()
+    private val installPermissionPrompt = mutableStateOf(false)
+
     override fun onCreate(savedInstanceState: Bundle?) {
         when (getSharedPreferences("appearance", MODE_PRIVATE).getString("mode", "SYSTEM")) {
             "LIGHT" -> setTheme(R.style.HydraStartingLight)
@@ -83,7 +84,61 @@ class MainActivity : ComponentActivity() {
             }.onFailure { provider.remove() }
         }
         enableEdgeToEdge()
-        setContent { HydraTheme { HydraApp() } }
+        setContent {
+            HydraTheme {
+                HydraApp()
+                updateDialog.value?.let { dialog ->
+                    UpdateDialog(dialog, onInstall = ::onDialogInstall, onDismiss = { updateDialog.value = null })
+                }
+                if (installPermissionPrompt.value) {
+                    InstallPermissionDialog(
+                        onOpenSettings = {
+                            installPermissionPrompt.value = false
+                            runCatching { startActivity(installPermissionSettingsIntent(this@MainActivity)) }
+                        },
+                        onDismiss = { installPermissionPrompt.value = false },
+                    )
+                }
+            }
+        }
+        checkForUpdateOnLaunch()
+    }
+
+    /** When auto-update is on, offers a found update so it can be installed. */
+    private fun checkForUpdateOnLaunch() {
+        val context = this
+        launchCheckScope.launch {
+            if (!updatesEnabled(context)) return@launch
+            val info = withContext(Dispatchers.IO) { checkForUpdate(context) } ?: return@launch
+            val apk =
+                withContext(Dispatchers.IO) { stagedUpdateApk(context, info) ?: downloadUpdate(context, info) }
+                    ?: return@launch
+            updateDialog.value = UpdateDialogState(info, apk)
+        }
+    }
+
+    private fun onDialogInstall() {
+        val dialog = updateDialog.value ?: return
+        if (!canInstallUpdates(this)) {
+            installPermissionPrompt.value = true
+            return
+        }
+        updateDialog.value = null
+        val context = this
+        MainScope().launch(Dispatchers.IO) {
+            try {
+                installUpdateApk(context, dialog.apk)
+            } catch (_: Exception) {
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(context, "The update could not be installed. Try again from Settings → About.", Toast.LENGTH_LONG).show()
+                }
+            }
+        }
+    }
+
+    override fun onDestroy() {
+        launchCheckScope.cancel()
+        super.onDestroy()
     }
 }
 
@@ -119,7 +174,6 @@ fun ChatScreen(vm: HydraModel) {
     val drawer = rememberDrawerState(DrawerValue.Closed)
     val snackbar = remember { SnackbarHostState() }
     var draft by rememberSaveable { mutableStateOf("") }
-    var showConnection by rememberSaveable { mutableStateOf(false) }
     var showModels by rememberSaveable { mutableStateOf(false) }
     var showContext by rememberSaveable { mutableStateOf(false) }
     var searchOpen by rememberSaveable { mutableStateOf(false) }
@@ -206,46 +260,54 @@ fun ChatScreen(vm: HydraModel) {
             }
             Spacer(Modifier.height(24.dp))
             if (vm.conversations.isEmpty()) {
-                Text(
-                    "Your conversations will appear here.\nThey’re saved on this device.",
-                    Modifier.padding(24.dp),
-                    color = cs.onSurfaceVariant,
-                )
-            }
-            LazyColumn {
-                items(vm.conversations, key = { it.id }) { c ->
-                    ConversationHistoryRow(
-                        ConversationRowUiState(c.title, c.id == vm.activeId),
-                        onOpen = {
-                            vm.open(c)
-                            draft = ""
-                            scope.launch { drawer.close() }
-                        },
-                        onRename = {
-                            renameTitle = c.title
-                            renameTarget = c
-                        },
-                        onExport = {
-                            val conversation = vm.conversations.firstOrNull { it.id == c.id } ?: c
-                            exportText =
-                                (
-                                    if (vm.activeId == c.id) {
-                                        conversation.copy(
-                                            messages = vm.messages,
-                                        )
-                                    } else {
-                                        conversation
-                                    }
-                                ).exportMarkdown()
-                            exporter.launch(
-                                c.title
-                                    .replace(Regex("[^\\p{L}\\p{N} ._-]"), "_")
-                                    .take(80)
-                                    .ifBlank { "Conversation" } + ".md",
-                            )
-                        },
-                        onDelete = { deleteTarget = c },
-                    )
+                Box(
+                    Modifier.fillMaxWidth().weight(1f).padding(24.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(12.dp),
+                    ) {
+                        Icon(Icons.Outlined.ChatBubbleOutline, null, Modifier.size(56.dp), tint = cs.onSurfaceVariant)
+                        Text("No chats yet", color = cs.onSurfaceVariant, textAlign = TextAlign.Center)
+                    }
+                }
+            } else {
+                LazyColumn {
+                    items(vm.conversations, key = { it.id }) { c ->
+                        ConversationHistoryRow(
+                            ConversationRowUiState(c.title, c.id == vm.activeId),
+                            onOpen = {
+                                vm.open(c)
+                                draft = ""
+                                scope.launch { drawer.close() }
+                            },
+                            onRename = {
+                                renameTitle = c.title
+                                renameTarget = c
+                            },
+                            onExport = {
+                                val conversation = vm.conversations.firstOrNull { it.id == c.id } ?: c
+                                exportText =
+                                    (
+                                        if (vm.activeId == c.id) {
+                                            conversation.copy(
+                                                messages = vm.messages,
+                                            )
+                                        } else {
+                                            conversation
+                                        }
+                                    ).exportMarkdown()
+                                exporter.launch(
+                                    c.title
+                                        .replace(Regex("[^\\p{L}\\p{N} ._-]"), "_")
+                                        .take(80)
+                                        .ifBlank { "Conversation" } + ".md",
+                                )
+                            },
+                            onDelete = { deleteTarget = c },
+                        )
+                    }
                 }
             }
         }
@@ -268,7 +330,7 @@ fun ChatScreen(vm: HydraModel) {
                         Text("hydra", style = MaterialTheme.typography.hydraTitle)
                         Spacer(Modifier.weight(1f))
                         ContextRingButton(vm.contextUsage, onClick = { showContext = true })
-                        HintIconButton("Start a new chat", Icons.AutoMirrored.Outlined.NoteAdd, onClick = {
+                        HintIconButton("Start a new chat", Icons.Outlined.AddComment, onClick = {
                             vm.newChat()
                             draft = ""
                         })
@@ -291,11 +353,7 @@ fun ChatScreen(vm: HydraModel) {
                             onAction = if (canContinue) ({ vm.continueResponse() }) else null,
                         )
                     }
-                    AnimatedVisibility(
-                        visible = !searchOpen,
-                        enter = expandVertically(spring(stiffness = 520f)) + fadeIn(spring(stiffness = 520f)),
-                        exit = shrinkVertically(spring(stiffness = 520f)) + fadeOut(spring(stiffness = 520f)),
-                    ) {
+                    if (!searchOpen) {
                         Column {
                             Surface(
                                 color = cs.surfaceContainer,
@@ -451,11 +509,10 @@ fun ChatScreen(vm: HydraModel) {
     if (showContext) {
         ContextSheet(vm.contextUsage, { vm.setContextTokens(it) }) { showContext = false }
     }
-    if (showConnection) ConnectionSheet(vm, onDismiss = { showConnection = false })
     if (showModels) {
         ModelPickerSheet(vm, onConnections = {
             showModels = false
-            showConnection = true
+            openConnections(context)
         }, onDismiss = { showModels = false })
     }
     vm.pendingQuestions?.let { request ->

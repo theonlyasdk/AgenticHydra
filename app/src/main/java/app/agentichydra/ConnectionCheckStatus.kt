@@ -26,6 +26,7 @@ import androidx.compose.ui.semantics.ProgressBarRangeInfo
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.progressBarRangeInfo
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -58,18 +59,17 @@ fun ConnectionCheckStatus() {
 @Composable
 private fun ConnectionCheckStatusContent(message: String) {
     val cs = MaterialTheme.colorScheme
-    Row(
-        Modifier.fillMaxWidth().padding(vertical = 24.dp).clearAndSetSemantics {
+    Column(
+        Modifier.fillMaxWidth().padding(top = 24.dp).clearAndSetSemantics {
             contentDescription = "Checking connection"
             progressBarRangeInfo = ProgressBarRangeInfo.Indeterminate
         },
-        verticalAlignment = Alignment.CenterVertically,
+        horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        HydraLoadingIndicator(56.dp, cs.primary, cs.surfaceContainerLow)
-        Spacer(Modifier.width(16.dp))
+        HydraLoadingIndicator(56.dp, cs.primary, cs.surface)
         Box(
-            Modifier.weight(1f).clipToBounds().verticalFadingEdges(cs.surfaceContainerLow, 12.dp),
-            contentAlignment = Alignment.CenterStart,
+            Modifier.fillMaxWidth().clipToBounds().verticalFadingEdges(cs.surface, 12.dp),
+            contentAlignment = Alignment.Center,
         ) {
             AnimatedContent(targetState = message, label = "Connection status", transitionSpec = {
                 (
@@ -80,7 +80,15 @@ private fun ConnectionCheckStatusContent(message: String) {
                     ) togetherWith
                         (slideOutVertically(spring(dampingRatio = .9f, stiffness = 350f)) { -it } + fadeOut(spring()))
                 ).using(null)
-            }) { text -> ShimmerStatusText(text, Modifier.padding(vertical = 12.dp)) }
+            }) { text ->
+                Text(
+                    text,
+                    Modifier.fillMaxWidth().padding(vertical = 12.dp),
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = cs.onSurfaceVariant,
+                    textAlign = TextAlign.Center,
+                )
+            }
         }
     }
 }
@@ -161,7 +169,7 @@ fun HydraLoadingIndicator(
 private fun ConnectionCheckPreview() {
     HydraTheme {
         Surface(
-            color = MaterialTheme.colorScheme.surfaceContainerLow,
+            color = MaterialTheme.colorScheme.surface,
         ) { ConnectionCheckStatusContent("Checking your connection…") }
     }
 }

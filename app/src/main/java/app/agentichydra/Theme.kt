@@ -30,13 +30,16 @@ enum class AppThemeMode(
     DARK("Dark"),
 }
 
-/** How the agent's thinking row is drawn: the Material 3 morphing blob or a classic spinner. */
+/** The activity indicator shown while the agent thinks. */
 enum class ThinkingAnimation(
     val label: String,
     val detail: String,
 ) {
     BLOB("Loading blob", "Material 3 morphing shape"),
     SPINNER("Circular spinner", "Classic indeterminate ring"),
+    DOTS("Bouncing dots", "Three dots bounce in sequence"),
+    PULSE("Ripple pulse", "A ring expands around a dot"),
+    ORBIT("Orbiting dots", "Two dots circle the center"),
 }
 
 data class AppearanceUiState(

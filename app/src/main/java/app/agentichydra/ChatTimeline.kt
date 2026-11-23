@@ -37,6 +37,7 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.MotionDurationScale
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
@@ -56,6 +57,7 @@ import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.Velocity
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlin.math.exp
 import kotlin.math.roundToInt
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -128,11 +130,6 @@ fun ChatTimeline(
     val matchGroups = remember(matches) { messageMatchGroups(matches) }
     var cursor by remember(state.conversationId) { mutableStateOf(0) }
     val activeMatch = if (matches.isEmpty()) -1 else cursor.coerceIn(0, matches.lastIndex)
-    val searchClearance by animateDpAsState(
-        targetValue = if (searchOpen) 84.dp else 16.dp,
-        animationSpec = spring(stiffness = 520f),
-        label = "Search clearance",
-    )
     // While tokens stream in, keep the growing tail a couple of lines clear of the composer.
     val tailClearance by animateDpAsState(
         targetValue = if (state.streamingResponseId != null) 64.dp else 16.dp,
@@ -232,203 +229,65 @@ fun ChatTimeline(
                 }
             }
         }
+    val streaming by rememberUpdatedState(state.streamingResponseId != null)
+    val searching by rememberUpdatedState(searchOpen)
     LaunchedEffect(listState, state.conversationId) {
-        // Follow measured geometry, not token callbacks. A single message can exceed the viewport.
         snapshotFlow {
             val layout = listState.layoutInfo
             val last = layout.visibleItemsInfo.lastOrNull()
             TailLayout(
-                following,
+                following && !searching,
                 dragging,
                 listState.isScrollInProgress,
                 layout.totalItemsCount,
                 last?.index ?: -1,
-                (last?.offset ?: 0) + (last?.size ?: 0),
+                (last?.offset ?: 0) + (last?.size ?: 0) + layout.afterContentPadding,
                 layout.viewportEndOffset,
             )
         }.collect { tail ->
-            if (tail.following && !tail.dragging && !tail.scrolling && tail.count > 0 && listState.canScrollForward) {
-                if (state.streamingResponseId == null) {
-                    withFrameNanos { }
-                }
-                if (following && !dragging && !listState.isScrollInProgress && listState.canScrollForward) {
-                    launch { listState.scrollToItem(listState.layoutInfo.totalItemsCount - 1, 100_000) }.join()
-                }
+            if (!tail.following || tail.dragging || tail.scrolling || tail.count == 0 || !listState.canScrollForward) {
+                return@collect
             }
+            launch {
+                val motionScale = coroutineContext[MotionDurationScale]?.scaleFactor ?: 1f
+                if (!streaming || motionScale == 0f) {
+                    withFrameNanos { }
+                    if (following && !searching && !dragging && !listState.isScrollInProgress && listState.canScrollForward) {
+                        listState.scrollToItem(listState.layoutInfo.totalItemsCount - 1, 100_000)
+                    }
+                    return@launch
+                }
+
+                var previousFrame = withFrameNanos { it }
+                while (following && !searching && !dragging && !listState.isScrollInProgress && listState.canScrollForward) {
+                    val frame = withFrameNanos { it }
+                    if (!following || searching || dragging || listState.isScrollInProgress) break
+                    val layout = listState.layoutInfo
+                    val last = layout.visibleItemsInfo.lastOrNull() ?: break
+                    val remaining = if (last.index == layout.totalItemsCount - 1) {
+                        last.offset + last.size + layout.afterContentPadding - layout.viewportEndOffset
+                    } else {
+                        layout.viewportSize.height
+                    }
+                    if (remaining <= 0) break
+                    val elapsed = (frame - previousFrame) / 1_000_000.0
+                    val fraction = 1 - exp(-elapsed / (55.0 * motionScale))
+                    val step = (remaining * fraction).toFloat().coerceIn(1f, remaining.toFloat())
+                    previousFrame = frame
+                    if (listState.scrollBy(step) == 0f) break
+                }
+            }.join()
         }
     }
 
     var menuById by remember { mutableStateOf<String?>(null) }
-    Box(modifier) {
-        LazyColumn(
-            state = listState,
-            modifier = Modifier.fillMaxSize().nestedScroll(userScroll).testTag("chat-timeline"),
-            contentPadding = PaddingValues(start = 24.dp, top = searchClearance, end = 24.dp, bottom = tailClearance),
-        ) {
-            itemsIndexed(state.messages, key = { _, message -> message.id }) { index, message ->
-                val adjacentTool = message.role == "tool" && state.messages.getOrNull(index + 1)?.role == "tool"
-                val followedByTool = message.role == "assistant" && state.messages.getOrNull(index + 1)?.role == "tool"
-                val precededByTool = message.role == "assistant" && state.messages.getOrNull(index - 1)?.role == "tool"
-                val next = state.messages.getOrNull(index + 1)
-                val group = matchGroups[message.id]
-                val highlight =
-                    group?.let {
-                        ChatHighlight(
-                            query,
-                            if (activeMatch >= 0 && matches[activeMatch].messageId == message.id) {
-                                activeMatch - it.first
-                            } else {
-                                -1
-                            },
-                        )
-                    }
-                val invisibleAssistant =
-                    message.role == "assistant" &&
-                        message.text.isBlank() &&
-                        message.thought.isBlank() &&
-                        message.id != state.streamingResponseId
-                val hiddenAssistantBeforeTool =
-                    message.role == "tool" &&
-                        next?.role == "assistant" &&
-                        next.text.isBlank() &&
-                        next.thought.isBlank() &&
-                        next.id != state.streamingResponseId &&
-                        state.messages.getOrNull(index + 2)?.role == "tool"
-                Column(
-                    Modifier.fillMaxWidth().padding(
-                        bottom =
-                            when {
-                                invisibleAssistant -> 0.dp
-                                message.role == "tool" && (adjacentTool || hiddenAssistantBeforeTool) -> 0.dp
-                                message.role == "tool" -> if (index < state.messages.lastIndex) 4.dp else 0.dp
-                                followedByTool -> 4.dp
-                                index < state.messages.lastIndex -> 24.dp
-                                else -> 0.dp
-                            },
-                    ),
-                ) {
-                    if (message.id in timeMarkers) {
-                        ChatTimeDivider(message.createdAt)
-                        Spacer(Modifier.height(16.dp))
-                    }
-                    when (message.role) {
-                        "model" -> {
-                            ModelChangeMarker(
-                                message,
-                                state.messages.subList(0, index).lastOrNull { it.modelId.isNotBlank() },
-                            )
-                        }
-
-                        "tool" -> {
-                            var start = index
-                            var end = index
-                            while (start > 0 && state.messages[start - 1].role == "tool")start--
-                            while (end < state.messages.lastIndex && state.messages[end + 1].role == "tool")end++
-                            toolContent?.invoke(message, index - start, end - start + 1)
-                        }
-
-                        "notice" -> {
-                            Text(
-                                message.text,
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                        }
-
-                        else -> {
-                            Box(Modifier.fillMaxWidth()) {
-                                val prompt =
-                                    remember(state.messages, message.id) {
-                                        val idx = state.messages.indexOfFirst { it.id == message.id }
-                                        if (idx > 0) state.messages[idx - 1].text else ""
-                                    }
-                                Box(Modifier.combinedClickable(onClick = {}, onLongClick = { menuById = message.id })) {
-                                    ChatMessageContent(
-                                        message,
-                                        message.id == state.streamingResponseId,
-                                        onCopy,
-                                        onShare,
-                                        prompt,
-                                        showHydraTitle,
-                                        followedByTool,
-                                        precededByTool,
-                                        highlight,
-                                        onViewQuiz = onViewQuiz?.let { open -> { open(message) } },
-                                    )
-                                }
-                                MessageActionMenu(
-                                    message,
-                                    menuById == message.id,
-                                    onCopy,
-                                    messageActions,
-                                    enabled = state.streamingResponseId != message.id,
-                                ) { menuById = null }
-                            }
-                        }
-                    }
-                }
-            }
-            if (trailingContent != null) item(key = "timeline-status") { trailingContent() }
-            item(key = "conversation-end") { Spacer(Modifier.fillMaxWidth().height(4.dp).testTag("conversation-end")) }
-        }
-        val background = MaterialTheme.colorScheme.background
-        // Draw above the scrolling content, including hosted Markdown views, below the controls.
-        AnimatedVisibility(
-            visible = !atTop,
-            enter = fadeIn(),
-            exit = fadeOut(),
-            modifier = Modifier.align(Alignment.TopCenter).fillMaxWidth(),
-        ) {
-            Box(
-                Modifier
-                    .fillMaxWidth()
-                    .height(32.dp)
-                    .background(Brush.verticalGradient(listOf(background, Color.Transparent))),
-            )
-        }
-        AnimatedVisibility(
-            visible = !atBottom,
-            enter = fadeIn(),
-            exit = fadeOut(),
-            modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth(),
-        ) {
-            Box(
-                Modifier
-                    .fillMaxWidth()
-                    .height(32.dp)
-                    .background(Brush.verticalGradient(listOf(Color.Transparent, background))),
-            )
-        }
-        AnimatedVisibility(
-            visible = !following && !atBottom,
-            enter = scaleIn(spring(stiffness = 650f), initialScale = .65f) + fadeIn(spring(stiffness = 650f)),
-            exit = scaleOut(spring(stiffness = 850f), targetScale = .65f) + fadeOut(spring(stiffness = 850f)),
-            modifier = Modifier.align(Alignment.BottomEnd).padding(16.dp),
-        ) {
-            SmallFloatingActionButton(
-                onClick = {
-                    scope.launch {
-                        listState.animateScrollToItem(listState.layoutInfo.totalItemsCount - 1)
-                        following = true
-                    }
-                },
-                modifier = Modifier.size(48.dp),
-                shape = MaterialTheme.shapes.large,
-                containerColor = background,
-                elevation = FloatingActionButtonDefaults.elevation(defaultElevation = 6.dp, pressedElevation = 8.dp),
-            ) {
-                Icon(Icons.Outlined.ArrowDownward, "Jump to latest")
-            }
-        }
+    Column(modifier) {
         AnimatedVisibility(
             visible = searchOpen,
-            enter = slideInVertically(spring(stiffness = 520f)) { -it } + fadeIn(spring(stiffness = 520f)),
+            enter = slideInVertically(spring(stiffness = 520f)) { -it } +
+                expandVertically(spring(stiffness = 520f), expandFrom = Alignment.Top) +
+                fadeIn(spring(stiffness = 520f)),
             exit = slideOutVertically(spring(stiffness = 520f)) { -it } + fadeOut(spring(stiffness = 520f)),
-            modifier =
-                Modifier
-                    .align(Alignment.TopCenter)
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 8.dp),
         ) {
             ChatFindBar(
                 query = typed,
@@ -438,7 +297,171 @@ fun ChatTimeline(
                 onPrevious = { goToMatch(cursor - 1) },
                 onNext = { goToMatch(cursor + 1) },
                 onClose = { closeSearch() },
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
             )
+        }
+        Box(Modifier.fillMaxWidth().weight(1f)) {
+            LazyColumn(
+                state = listState,
+                modifier = Modifier.fillMaxSize().nestedScroll(userScroll).testTag("chat-timeline"),
+                contentPadding = PaddingValues(start = 24.dp, top = 16.dp, end = 24.dp, bottom = tailClearance),
+            ) {
+                itemsIndexed(state.messages, key = { _, message -> message.id }) { index, message ->
+                    val adjacentTool = message.role == "tool" && state.messages.getOrNull(index + 1)?.role == "tool"
+                    val followedByTool = message.role == "assistant" && state.messages.getOrNull(index + 1)?.role == "tool"
+                    val precededByTool = message.role == "assistant" && state.messages.getOrNull(index - 1)?.role == "tool"
+                    val next = state.messages.getOrNull(index + 1)
+                    val group = matchGroups[message.id]
+                    val highlight =
+                        group?.let {
+                            ChatHighlight(
+                                query,
+                                if (activeMatch >= 0 && matches[activeMatch].messageId == message.id) {
+                                    activeMatch - it.first
+                                } else {
+                                    -1
+                                },
+                            )
+                        }
+                    val invisibleAssistant =
+                        message.role == "assistant" &&
+                            message.text.isBlank() &&
+                            message.thought.isBlank() &&
+                            message.id != state.streamingResponseId
+                    val hiddenAssistantBeforeTool =
+                        message.role == "tool" &&
+                            next?.role == "assistant" &&
+                            next.text.isBlank() &&
+                            next.thought.isBlank() &&
+                            next.id != state.streamingResponseId &&
+                            state.messages.getOrNull(index + 2)?.role == "tool"
+                    Column(
+                        Modifier.fillMaxWidth().padding(
+                            bottom =
+                                when {
+                                    invisibleAssistant -> 0.dp
+                                    message.role == "tool" && (adjacentTool || hiddenAssistantBeforeTool) -> 0.dp
+                                    message.role == "tool" -> if (index < state.messages.lastIndex) 4.dp else 0.dp
+                                    followedByTool -> 4.dp
+                                    index < state.messages.lastIndex -> 24.dp
+                                    else -> 0.dp
+                                },
+                        ),
+                    ) {
+                        if (message.id in timeMarkers) {
+                            ChatTimeDivider(message.createdAt)
+                            Spacer(Modifier.height(16.dp))
+                        }
+                        when (message.role) {
+                            "model" -> {
+                                ModelChangeMarker(
+                                    message,
+                                    state.messages.subList(0, index).lastOrNull { it.modelId.isNotBlank() },
+                                )
+                            }
+
+                            "tool" -> {
+                                var start = index
+                                var end = index
+                                while (start > 0 && state.messages[start - 1].role == "tool")start--
+                                while (end < state.messages.lastIndex && state.messages[end + 1].role == "tool")end++
+                                toolContent?.invoke(message, index - start, end - start + 1)
+                            }
+
+                            "notice" -> {
+                                Text(
+                                    message.text,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+
+                            else -> {
+                                Box(Modifier.fillMaxWidth()) {
+                                    val prompt =
+                                        remember(state.messages, message.id) {
+                                            val idx = state.messages.indexOfFirst { it.id == message.id }
+                                            if (idx > 0) state.messages[idx - 1].text else ""
+                                        }
+                                    Box(Modifier.combinedClickable(onClick = {}, onLongClick = { menuById = message.id })) {
+                                        ChatMessageContent(
+                                            message,
+                                            message.id == state.streamingResponseId,
+                                            onCopy,
+                                            onShare,
+                                            prompt,
+                                            showHydraTitle,
+                                            followedByTool,
+                                            precededByTool,
+                                            highlight,
+                                            onViewQuiz = onViewQuiz?.let { open -> { open(message) } },
+                                        )
+                                    }
+                                    MessageActionMenu(
+                                        message,
+                                        menuById == message.id,
+                                        onCopy,
+                                        messageActions,
+                                        enabled = state.streamingResponseId != message.id,
+                                    ) { menuById = null }
+                                }
+                            }
+                        }
+                    }
+                }
+                if (trailingContent != null) item(key = "timeline-status") { trailingContent() }
+                item(key = "conversation-end") { Spacer(Modifier.fillMaxWidth().height(4.dp).testTag("conversation-end")) }
+            }
+            val background = MaterialTheme.colorScheme.background
+            // Draw above the scrolling content, including hosted Markdown views, below the controls.
+            androidx.compose.animation.AnimatedVisibility(
+                visible = !atTop,
+                enter = fadeIn(),
+                exit = fadeOut(),
+                modifier = Modifier.align(Alignment.TopCenter).fillMaxWidth(),
+            ) {
+                Box(
+                    Modifier
+                        .fillMaxWidth()
+                        .height(32.dp)
+                        .background(Brush.verticalGradient(listOf(background, Color.Transparent))),
+                )
+            }
+            androidx.compose.animation.AnimatedVisibility(
+                visible = !atBottom,
+                enter = fadeIn(),
+                exit = fadeOut(),
+                modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth(),
+            ) {
+                Box(
+                    Modifier
+                        .fillMaxWidth()
+                        .height(32.dp)
+                        .background(Brush.verticalGradient(listOf(Color.Transparent, background))),
+                )
+            }
+            androidx.compose.animation.AnimatedVisibility(
+                visible = !following && !atBottom,
+                enter = scaleIn(spring(stiffness = 650f), initialScale = .65f) + fadeIn(spring(stiffness = 650f)),
+                exit = scaleOut(spring(stiffness = 850f), targetScale = .65f) + fadeOut(spring(stiffness = 850f)),
+                modifier = Modifier.align(Alignment.BottomEnd).padding(16.dp),
+            ) {
+                SmallFloatingActionButton(
+                    onClick = {
+                        scope.launch {
+                            listState.animateScrollToItem(listState.layoutInfo.totalItemsCount - 1)
+                            following = true
+                        }
+                    },
+                    modifier = Modifier.size(48.dp),
+                    shape = MaterialTheme.shapes.large,
+                    containerColor = background,
+                    elevation = FloatingActionButtonDefaults.elevation(defaultElevation = 6.dp, pressedElevation = 8.dp),
+                ) {
+                    Icon(Icons.Outlined.ArrowDownward, "Jump to latest")
+                }
+            }
+
         }
     }
 }
@@ -641,7 +664,12 @@ private fun ChatMessageContent(
             }
             if (message.text.isNotBlank()) {
                 if (message.thought.isNotBlank()) Spacer(Modifier.height(4.dp))
-                MarkdownBody(message.text, highlight = highlight, streaming = streaming)
+                MarkdownBody(
+                    message.text,
+                    highlight = highlight,
+                    streaming = streaming,
+                    streamChunkStarts = message.streamChunkStarts,
+                )
                 if (isFinalSummary) {
                     ResponseActions(
                         message,

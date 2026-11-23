@@ -7,6 +7,7 @@ import android.content.res.Configuration
 import android.widget.Toast
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -47,6 +48,11 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.text
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
@@ -138,6 +144,7 @@ internal data class ExternalIntentRequest(
     val message: String,
     val detail: String?,
     val question: String,
+    val isUrl: Boolean = false,
     val action: () -> Unit,
 )
 
@@ -169,12 +176,13 @@ internal fun openExternalIntent(
     message: String,
     detail: String?,
     question: String,
+    isUrl: Boolean = false,
     action: () -> Unit,
 ) {
     if (prompt == null || !confirmsExternalIntents(context)) {
         action()
     } else {
-        prompt.ask(ExternalIntentRequest(icon, message, detail, question, action))
+        prompt.ask(ExternalIntentRequest(icon, message, detail, question, isUrl, action))
     }
 }
 
@@ -236,14 +244,18 @@ private fun ExternalIntentConfirmation(
             textAlign = TextAlign.Center,
         )
         request.detail?.let { detail ->
-            Text(
-                detail,
-                style = MaterialTheme.typography.bodyMedium,
-                color = cs.onSurfaceVariant,
-                textAlign = TextAlign.Center,
-                maxLines = 3,
-                overflow = TextOverflow.Ellipsis,
-            )
+            if (request.isUrl) {
+                ExternalUrlDetail(detail)
+            } else {
+                Text(
+                    detail,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = cs.onSurfaceVariant,
+                    textAlign = TextAlign.Center,
+                    maxLines = 3,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
         }
         Text(request.question, style = MaterialTheme.typography.titleMedium)
         Row(
@@ -262,6 +274,44 @@ private fun ExternalIntentConfirmation(
                 modifier = Modifier.weight(1f).heightIn(min = 48.dp),
             ) { Text("Yes") }
         }
+    }
+}
+
+@Composable
+private fun ExternalUrlDetail(url: String) {
+    val style = MaterialTheme.typography.bodyMedium
+    val measurer = rememberTextMeasurer()
+    val density = LocalDensity.current
+    BoxWithConstraints(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+        val available = with(density) { maxWidth.roundToPx() }
+        val label = remember(url, style, measurer, available) {
+            fun fits(value: String): Boolean =
+                measurer.measure(value, style, maxLines = 1, softWrap = false).size.width <= available
+
+            if (fits(url)) {
+                url
+            } else {
+                var low = 0
+                var high = url.codePointCount(0, url.length) - 1
+                while (low < high) {
+                    val keep = (low + high + 1) / 2
+                    val start = url.offsetByCodePoints(0, (keep + 1) / 2)
+                    val end = url.offsetByCodePoints(url.length, -(keep / 2))
+                    if (fits(url.take(start) + "?" + url.substring(end))) low = keep else high = keep - 1
+                }
+                val start = url.offsetByCodePoints(0, (low + 1) / 2)
+                val end = url.offsetByCodePoints(url.length, -(low / 2))
+                url.take(start) + "?" + url.substring(end)
+            }
+        }
+        Text(
+            label,
+            style = style,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1,
+            softWrap = false,
+            modifier = Modifier.clearAndSetSemantics { text = AnnotatedString(url) },
+        )
     }
 }
 
@@ -382,8 +432,9 @@ private fun ExternalIntentConfirmationPreview() {
                 ExternalIntentRequest(
                     Icons.AutoMirrored.Outlined.OpenInNew,
                     "This link opens in another app.",
-                    "developer.android.com",
+                    "https://developer.android.com/develop/ui/compose",
                     "Open it?",
+                    isUrl = true,
                 ) {},
             ) {}
         }

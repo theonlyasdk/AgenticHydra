@@ -19,11 +19,9 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.*
 import androidx.compose.animation.expandHorizontally
-import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkHorizontally
-import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.togetherWith
@@ -850,7 +848,6 @@ private fun WorkChatRoute(
     val externalPrompt = LocalExternalIntentPrompt.current
     var draft by rememberSaveable(id) { mutableStateOf("") }
     var models by rememberSaveable { mutableStateOf(false) }
-    var connections by rememberSaveable { mutableStateOf(false) }
     var approvals by rememberSaveable { mutableStateOf(false) }
     var files by rememberSaveable { mutableStateOf(false) }
     var changes by rememberSaveable { mutableStateOf(false) }
@@ -970,7 +967,7 @@ private fun WorkChatRoute(
             onApprovals = {
                 approvals = true
             },
-            onConnections = { connections = true },
+            onConnections = { openConnections(context) },
             onApprove = vm::approveStep,
             onDismissError = { vm.error = null },
             onAttachFile = {
@@ -1030,10 +1027,9 @@ private fun WorkChatRoute(
     if (models) {
         ModelPickerSheet(chat, onConnections = {
             models = false
-            connections = true
+            openConnections(context)
         }, onDismiss = { models = false })
     }
-    if (connections) ConnectionSheet(chat) { connections = false }
     if (approvals) ApprovalSheet(vm) { approvals = false }
     if (files) WorkFilesSheet(vm) { files = false }
     if (changes) {
@@ -1231,11 +1227,7 @@ fun WorkChatScreen(
                 )
                 Spacer(Modifier.height(8.dp))
             }
-            AnimatedVisibility(
-                visible = !searchOpen,
-                enter = expandVertically(spring(stiffness = 520f)) + fadeIn(spring(stiffness = 520f)),
-                exit = shrinkVertically(spring(stiffness = 520f)) + fadeOut(spring(stiffness = 520f)),
-            ) {
+            if (!searchOpen) {
                 Column {
                     if (showMentions) {
                         mention?.let { active ->

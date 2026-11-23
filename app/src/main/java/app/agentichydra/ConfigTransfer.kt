@@ -212,6 +212,11 @@ internal fun applyConfig(
     val models = (context.applicationContext as HydraApplication).models
     val chat = models[HydraModel::class.java]
     val hydra = settings.optJSONObject("hydra") ?: JSONObject()
+    chat.invalidateConnectionChecks(
+        Provider.entries.filter {
+            keys.has(it.name) || hydra.has("endpoint_${it.name}") || hydra.optString("provider") == it.name
+        },
+    )
     if (hydra.has("provider")) {
         val provider = runCatching { Provider.valueOf(hydra.optString("provider")) }.getOrElse { Provider.NIM }
         // A bundle can leave keys out; an empty key would then erase the live one.

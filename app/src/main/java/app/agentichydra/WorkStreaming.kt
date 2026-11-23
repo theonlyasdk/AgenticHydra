@@ -19,6 +19,27 @@ import kotlin.coroutines.resumeWithException
 
 internal val JSON_MEDIA_TYPE = "application/json".toMediaType()
 
+internal data class StreamDraft(val text: String, val thought: String, val chunkStarts: List<Int>)
+
+/** Tracks provider chunks before draft updates are batched for the UI. */
+internal class StreamChunkTail {
+    private var length = 0
+    private var starts = emptyList<Int>()
+
+    fun append(text: String) {
+        if (text.length < length) {
+            length = 0
+            starts = emptyList()
+        }
+        if (text.length > length) {
+            starts = (starts + length).takeLast(2)
+            length = text.length
+        }
+    }
+
+    fun snapshot(text: String, thought: String) = StreamDraft(text, thought, starts)
+}
+
 /**
  * One streaming `/chat/completions` turn for the task loop.
  *

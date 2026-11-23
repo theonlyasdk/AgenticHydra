@@ -122,7 +122,8 @@ internal fun SettingsPage(
                         Text("Agentic Hydra", style = MaterialTheme.typography.hydraTitle)
                         Text(
                             "A little intelligence. A human in control.",
-                            style = MaterialTheme.typography.titleMedium,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = cs.onSurfaceVariant,
                             modifier = Modifier.padding(top = 8.dp),
                         )
                         Spacer(Modifier.height(24.dp))
@@ -130,14 +131,24 @@ internal fun SettingsPage(
                             horizontalArrangement = Arrangement.spacedBy(4.dp),
                             verticalArrangement = Arrangement.spacedBy(4.dp),
                         ) {
-                            Text("Made with", modifier = Modifier.align(Alignment.CenterVertically))
+                            Text(
+                                "Made with",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = cs.onSurfaceVariant,
+                                modifier = Modifier.align(Alignment.CenterVertically),
+                            )
                             Icon(
                                 Icons.Outlined.Favorite,
                                 "love",
                                 Modifier.size(20.dp).align(Alignment.CenterVertically),
                                 tint = cs.primary,
                             )
-                            Text("by", modifier = Modifier.align(Alignment.CenterVertically))
+                            Text(
+                                "by",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = cs.onSurfaceVariant,
+                                modifier = Modifier.align(Alignment.CenterVertically),
+                            )
                             TextButton(onClick = {
                                 openExternally(context, "https://github.com/theonlyasdk", externalPrompt)
                             }) {
@@ -148,16 +159,22 @@ internal fun SettingsPage(
                                     tint = LocalContentColor.current,
                                 )
                                 Spacer(Modifier.width(8.dp))
-                                Text("theonlyasdk")
+                                Text("theonlyasdk", style = MaterialTheme.typography.bodyMedium)
                             }
                         }
+                        Spacer(Modifier.height(16.dp))
+                        AutoUpdateCard()
                     }
                     Column(
                         Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(bottom = 16.dp),
                         horizontalAlignment = Alignment.CenterHorizontally,
                     ) {
-                        Text("© 2026", style = MaterialTheme.typography.bodyMedium, color = cs.onSurfaceVariant)
-                        Text("Version 1.3.0 · MIT license", style = MaterialTheme.typography.bodySmall)
+                        Text("© 2026", style = MaterialTheme.typography.bodySmall, color = cs.onSurfaceVariant)
+                        Text(
+                            "Version ${appVersionName(context)} · MIT license",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = cs.onSurfaceVariant,
+                        )
                     }
                 }
             } else if (page == "language") {
@@ -189,31 +206,21 @@ internal fun SettingsPage(
                         }
 
                         "storage" -> {
-                            Text("What’s kept, and where", style = MaterialTheme.typography.titleLarge)
-                            Text(
-                                "Your conversations and task histories are saved on this device only. The app keeps up to 100 chats and 40 task conversations — older ones quietly make room when you go over. Want to keep something for good? Export it from the sidebar first.",
-                            )
-                            Text(
-                                "Attachments are covered too: text and code files can be up to 128 KiB and images up to 4 MiB, with up to four at a time per message.",
-                            )
-                            Text(
-                                "Each task remembers its own project folder, and new tasks start in the last folder you used. Deleting a conversation never touches your actual files — those stay right where they are.",
-                            )
-                            Spacer(Modifier.height(8.dp))
-                            Text("Move your setup to another phone", style = MaterialTheme.typography.titleMedium)
-                            Text(
-                                "Export writes the same setup Share shows as QR codes into one file you can keep or open on another phone. What travels — connection, API keys, appearance and approvals, and optionally your conversations — is picked with the ticks on Share settings. Keys travel unencrypted, so use a private room and a device you trust.",
-                            )
                             ConfigTransferRows()
-                            Spacer(Modifier.height(8.dp))
                             Button(
                                 onClick = { clearAll = true },
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = MaterialTheme.colorScheme.errorContainer,
+                                    contentColor = MaterialTheme.colorScheme.onErrorContainer,
+                                ),
                                 modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
                             ) {
                                 Icon(Icons.Outlined.DeleteOutline, null)
                                 Spacer(Modifier.width(8.dp))
                                 Text("Clear all chats")
                             }
+                            Text("Your chats and tasks are saved on this phone. Clearing chats leaves your tasks and project files alone.")
+                            Text("Moving to another phone? Export a file or share a QR code with your setup. Keep backups private if they include API keys.")
                         }
                     }
                 }

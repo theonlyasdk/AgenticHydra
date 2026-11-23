@@ -163,7 +163,6 @@ fun UserScreen(
     val appearanceState = rememberAppearanceState()
     val confirmExternal = rememberConfirmExternalIntents()
     var appearance by rememberSaveable { mutableStateOf(false) }
-    var connections by rememberSaveable { mutableStateOf(false) }
     var approvals by rememberSaveable { mutableStateOf(false) }
     var externalLinks by rememberSaveable { mutableStateOf(false) }
     val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
@@ -205,17 +204,16 @@ fun UserScreen(
             }
             item {
                 SettingsGroup {
+                    val configured = chat.configuredProviders
+                    val names = configured.take(2).joinToString(", ") { it.label }.ifEmpty { "None" }
+                    val remaining = configured.size - 2
                     SettingsEntry(
                         Icons.Outlined.Hub,
                         "Connections",
-                        Provider.entries
-                            .filter {
-                                chat.savedKey(it).isNotBlank()
-                            }.map { it.label }
-                            .ifEmpty { listOf("None") }
-                            .joinToString(", "),
+                        value = null,
+                        description = if (remaining > 0) "$names, $remaining more" else names,
                     ) {
-                        connections = true
+                        openConnections(context)
                     }
                     GroupDivider()
                     val advanced = rememberAdvancedModelSettings()
@@ -265,7 +263,7 @@ fun UserScreen(
                     GroupDivider()
                     SettingsEntry(Icons.Outlined.Storage, "Storage", null) { page("storage") }
                     GroupDivider()
-                    SettingsEntry(Icons.Outlined.Info, "Version", "1.3.0") { page("about") }
+                    SettingsEntry(Icons.Outlined.Info, "Version", appVersionName(context)) { page("about") }
                 }
             }
         }
@@ -297,7 +295,6 @@ fun UserScreen(
             }
         }
     }
-    if (connections) ConnectionSheet(chat) { connections = false }
     if (approvals) ApprovalSheet(work) { approvals = false }
     if (externalLinks) ToolSettingsSheet { externalLinks = false }
 }
@@ -317,6 +314,7 @@ private fun SettingsEntry(
     icon: ImageVector,
     title: String,
     value: String?,
+    description: String? = null,
     onClick: (() -> Unit)? = null,
 ) {
     val cs = MaterialTheme.colorScheme
@@ -331,7 +329,9 @@ private fun SettingsEntry(
                     Icon(Icons.Outlined.ChevronRight, null)
                 }
             }
-        }, colors = ListItemDefaults.colors(containerColor = cs.surfaceContainerHigh))
+        }, supportingContent = description?.let { { Text(it) } },
+            colors = ListItemDefaults.colors(containerColor = cs.surfaceContainerHigh),
+        )
     }
     if (onClick != null) {
         Surface(

@@ -11,6 +11,8 @@ import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -35,8 +37,10 @@ import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
@@ -228,7 +232,10 @@ internal fun ChatFindBar(
 ) {
     val cs = MaterialTheme.colorScheme
     val requester = remember { FocusRequester() }
-    LaunchedEffect(Unit) { requester.requestFocus() }
+    LaunchedEffect(requester) {
+        withFrameNanos { }
+        requester.requestFocus()
+    }
     Surface(
         color = cs.surfaceContainerHigh,
         shape = MaterialTheme.shapes.large,
@@ -248,7 +255,7 @@ internal fun ChatFindBar(
                 TextField(
                     value = query,
                     onValueChange = onQuery,
-                    placeholder = { Text("Search conversation", color = cs.onSurfaceVariant) },
+                    placeholder = { Text("Search...", color = cs.onSurfaceVariant) },
                     singleLine = true,
                     textStyle = MaterialTheme.typography.bodyLarge,
                     colors =
@@ -272,23 +279,26 @@ internal fun ChatFindBar(
                     Icon(Icons.Filled.Close, "Close search", tint = cs.onSurfaceVariant)
                 }
             }
-            // The result line sits below the field so the input keeps the full row width.
             AnimatedVisibility(
                 visible = query.isNotBlank(),
-                enter = expandVertically(spring(stiffness = 600f)) + fadeIn(spring(stiffness = 600f)),
-                exit = shrinkVertically(spring(stiffness = 600f)) + fadeOut(spring(stiffness = 600f)),
+                modifier = Modifier.clipToBounds(),
+                enter = slideInVertically(spring(stiffness = 600f)) { -it } +
+                    expandVertically(spring(stiffness = 600f), expandFrom = Alignment.Top) +
+                    fadeIn(spring(stiffness = 600f)),
+                exit = slideOutVertically(spring(stiffness = 600f)) { -it } + fadeOut(spring(stiffness = 600f)),
             ) {
-                Text(
-                    if (matchCount == 0) {
-                        "No results"
-                    } else {
-                        "${activeIndex + 1} of $matchCount " + if (matchCount == 1) "result" else "results"
-                    },
-                    style = MaterialTheme.typography.labelMedium,
-                    color = if (matchCount == 0) cs.error else cs.onSurfaceVariant,
-                    maxLines = 1,
-                    modifier = Modifier.padding(start = 32.dp, end = 16.dp, bottom = 8.dp),
-                )
+                Surface(
+                    modifier = Modifier.fillMaxWidth(),
+                    color = cs.surfaceContainerHighest,
+                ) {
+                    Text(
+                        if (matchCount == 0) "No matches" else "${activeIndex + 1} of $matchCount matches",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = cs.onSurfaceVariant,
+                        textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp),
+                    )
+                }
             }
         }
     }

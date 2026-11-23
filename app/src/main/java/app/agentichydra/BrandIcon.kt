@@ -1,12 +1,16 @@
 package app.agentichydra
 
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Dns
+import androidx.compose.material.icons.outlined.Terminal
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.colorResource
 import androidx.compose.ui.res.painterResource
 
-/** Bundled mark for the provider itself; local and custom endpoints keep Hydra's trident. */
+/** Bundled mark for the provider itself. */
 private fun providerMark(provider: Provider): Int? =
     when (provider) {
         Provider.NIM -> R.drawable.brand_nvidia
@@ -26,12 +30,35 @@ private fun providerMark(provider: Provider): Int? =
 fun ProviderIcon(
     provider: Provider,
     modifier: Modifier = Modifier,
+    colored: Boolean = false,
 ) {
     val resource = providerMark(provider)
-    if (resource != null) {
-        Icon(painterResource(resource), null, modifier, tint = MaterialTheme.colorScheme.onSurfaceVariant)
+    val tint = if (colored) {
+        when (provider) {
+            Provider.NIM -> colorResource(R.color.provider_nvidia)
+            Provider.GEMINI -> colorResource(R.color.provider_gemini)
+            Provider.GROQ -> colorResource(R.color.provider_groq)
+            Provider.CEREBRAS -> colorResource(R.color.provider_cerebras)
+            Provider.OPENROUTER -> colorResource(R.color.provider_openrouter)
+            Provider.MISTRAL -> colorResource(R.color.provider_mistral)
+            Provider.TOGETHER -> colorResource(R.color.provider_together)
+            Provider.FIREWORKS -> colorResource(R.color.provider_fireworks)
+            Provider.DEEPSEEK -> colorResource(R.color.provider_deepseek)
+            Provider.OLLAMA -> MaterialTheme.colorScheme.onSurface
+            Provider.LLAMACPP, Provider.CUSTOM -> MaterialTheme.colorScheme.primary
+        }
     } else {
-        HydraMark(modifier)
+        MaterialTheme.colorScheme.onSurfaceVariant
+    }
+    if (resource != null) {
+        Icon(painterResource(resource), null, modifier, tint = tint)
+    } else {
+        Icon(
+            if (provider == Provider.LLAMACPP) Icons.Outlined.Terminal else Icons.Outlined.Dns,
+            contentDescription = null,
+            modifier = modifier,
+            tint = tint,
+        )
     }
 }
 

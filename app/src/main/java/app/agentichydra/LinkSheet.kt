@@ -118,8 +118,9 @@ internal fun openExternally(
         prompt,
         Icons.AutoMirrored.Outlined.OpenInNew,
         "This link opens in another app.",
-        hostOf(url).take(120),
+        url,
         "Open it?",
+        isUrl = true,
     ) {
         runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) }
             .onFailure { Toast.makeText(context, "No app can open this link.", Toast.LENGTH_SHORT).show() }

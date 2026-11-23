@@ -290,6 +290,10 @@ internal class RoundedInlineCodeSpan(
         paint: Paint,
     ) {
         val code = codePaint(paint)
+        val opacity = (text as? Spanned)?.getSpans(start, end, FadeSpan::class.java)
+            ?.minOfOrNull { it.alpha } ?: 1f
+        if (opacity <= 0f) return
+        code.alpha = (code.alpha * opacity).toInt()
         val value = literal(text, start, end)
         val ink = android.graphics.Rect()
         code.getTextBounds(value, 0, value.length, ink)
@@ -303,6 +307,7 @@ internal class RoundedInlineCodeSpan(
             Paint(Paint.ANTI_ALIAS_FLAG).apply {
                 color =
                     background
+                alpha = (alpha * opacity).toInt()
             },
         )
         canvas.drawText(value, x + horizontal, center - (ink.top + ink.bottom) / 2f, code)

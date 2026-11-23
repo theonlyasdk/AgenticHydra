@@ -1,6 +1,5 @@
 package app.agentichydra
 
-import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.LinearOutSlowInEasing
@@ -11,7 +10,6 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
-import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.*
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
@@ -19,7 +17,6 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ManageSearch
 import androidx.compose.material.icons.outlined.*
@@ -39,17 +36,10 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.AnnotatedString
-import androidx.compose.ui.text.input.KeyboardType
-import androidx.compose.ui.text.input.PasswordVisualTransformation
-import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
-import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.ensureActive
-import kotlinx.coroutines.launch
 import kotlin.math.abs
 import kotlin.math.roundToInt
 
@@ -94,10 +84,29 @@ fun ModelPickerSheet(
     onDismiss: () -> Unit,
 ) {
     val cs = MaterialTheme.colorScheme
+    val providers = vm.enabledProviders
+    val initialProvider = vm.provider.takeIf { it in providers } ?: providers.firstOrNull()
+    if (initialProvider == null) {
+        var openConnections by remember { mutableStateOf(false) }
+        HydraBottomSheet(
+            onDismiss = { if (openConnections) onConnections() else onDismiss() },
+            containerColor = cs.surfaceContainerLow,
+            heading = { SheetHeader(Icons.Outlined.AutoAwesome, "Models", Modifier.padding(horizontal = 16.dp)) },
+        ) { dismiss ->
+            Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("No providers are enabled.")
+                Button(onClick = {
+                    openConnections = true
+                    dismiss()
+                }) { Text("Open Connections") }
+            }
+        }
+        return
+    }
     // Provider and model choices stay local drafts until Done commits them, so
     // browsing never rewrites the live connection or drops model-change markers into the chat.
-    var draftProvider by rememberSaveable { mutableStateOf(vm.provider) }
-    var draftModel by rememberSaveable { mutableStateOf(vm.model) }
+    var draftProvider by rememberSaveable(initialProvider) { mutableStateOf(initialProvider) }
+    var draftModel by rememberSaveable(initialProvider) { mutableStateOf(vm.savedModel(initialProvider)) }
     var draftManualPicked by rememberSaveable(draftProvider) { mutableStateOf(false) }
     var query by rememberSaveable(draftProvider) { mutableStateOf("") }
     var manual by rememberSaveable(draftProvider) { mutableStateOf(false) }
@@ -188,14 +197,12 @@ fun ModelPickerSheet(
                 )
             }
             IconButton(onClick = {
-                applyDraft()
                 connectionsAfterDismiss = true
                 close()
             }) { Icon(Icons.Outlined.Tune, "Provider connections") }
         }
     }) { dismiss ->
         val connect = {
-            applyDraft()
             connectionsAfterDismiss = true
             dismiss()
         }
@@ -208,7 +215,7 @@ fun ModelPickerSheet(
                     .padding(horizontal = 16.dp),
             ) {
                 Spacer(Modifier.height(8.dp))
-                ProviderChoices(draftProvider, onSelect = { p ->
+                ProviderChoices(draftProvider, providers = providers, onSelect = { p ->
                     if (p != draftProvider) {
                         draftProvider = p
                         draftModel = vm.savedModel(p)
@@ -519,6 +526,7 @@ data class ReasoningSelectorUiState(
 fun ProviderChoices(
     selected: Provider,
     onSelect: (Provider) -> Unit,
+    providers: Set<Provider> = Provider.entries.toSet(),
 ) {
     val scroll = rememberScrollState()
     val direction = LocalLayoutDirection.current
@@ -529,7 +537,7 @@ fun ProviderChoices(
             .horizontalScroll(scroll),
         horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        Provider.entries.forEach { provider ->
+        providers.forEach { provider ->
             // Default M3 chips are visually compact and retain their 48dp minimum touch target.
             FilterChip(
                 selected = selected == provider,
@@ -700,276 +708,4 @@ private fun ReasoningDarkPreview() {
 @Composable
 private fun ReasoningLargePreview() {
     HydraTheme { ReasoningSelector(ReasoningSelectorUiState(listOf("auto", "low", "medium", "high"), "high"), {}) }
-}
-
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-fun ConnectionSheet(
-    vm: HydraModel,
-    onDismiss: () -> Unit,
-) {
-    var selected by remember { mutableStateOf(vm.provider) }
-    var url by remember { mutableStateOf(vm.endpoint) }
-    var key by remember { mutableStateOf(vm.apiKey) }
-    var reveal by remember { mutableStateOf(false) }
-    var problem by remember { mutableStateOf<String?>(null) }
-    var manualModel by remember { mutableStateOf("") }
-    var showManualModel by remember { mutableStateOf(false) }
-    var check by remember { mutableStateOf(ConnectionCheckUiState()) }
-    val validator = remember { ConnectionValidator() }
-    val scope = rememberCoroutineScope()
-    val keyboard = LocalSoftwareKeyboardController.current
-    var checkJob by remember { mutableStateOf<Job?>(null) }
-    DisposableEffect(validator) {
-        onDispose {
-            checkJob?.cancel()
-            validator.cancel()
-        }
-    }
-    val cs = MaterialTheme.colorScheme
-    HydraBottomSheet(onDismiss = onDismiss, containerColor = cs.surfaceContainerLow) { dismiss ->
-        Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).imePadding()) {
-            SheetHeader(
-                Icons.Outlined.Hub,
-                "Connections",
-                Modifier.fillMaxWidth().padding(horizontal = 16.dp).testTag("connections-header"),
-            )
-            Column(
-                Modifier.fillMaxWidth().padding(horizontal = 24.dp).padding(top = 16.dp, bottom = 24.dp),
-                verticalArrangement = Arrangement.spacedBy(16.dp),
-            ) {
-                fun formProblem(): String? {
-                    val parsed = runCatching { java.net.URI(url.trim()) }.getOrNull()
-                    val scheme = parsed?.scheme
-                    val hasHttpScheme = scheme == "https" || scheme == "http"
-                    val hasUrlExtras = parsed?.userInfo != null || parsed?.query != null || parsed?.fragment != null
-                    return when {
-                        !hasHttpScheme || parsed?.host.isNullOrBlank() -> "Enter a valid HTTP or HTTPS base URL."
-                        hasUrlExtras -> "Use a base URL without credentials or query parameters."
-                        selected.keyRequired && key.isBlank() -> "Enter your ${selected.label} API key."
-                        scheme == "http" && key.isNotBlank() -> "Use HTTPS when sending an API key."
-                        else -> null
-                    }
-                }
-
-                fun preferredModel(): String {
-                    val typedModel = manualModel.trim()
-                    if (typedModel.isNotEmpty()) return typedModel
-                    val endpointMatches =
-                        url.trim().trimEnd('/') == vm.savedEndpoint(selected).trimEnd('/')
-                    return if (endpointMatches) vm.savedModel(selected) else ""
-                }
-                AnimatedContent(targetState = check.phase, label = "Connection check content", transitionSpec = {
-                    (fadeIn(tween(120)) togetherWith fadeOut(tween(80))).using(null)
-                }) { phase ->
-                    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(16.dp)) {
-                        when (phase) {
-                            ConnectionCheckPhase.Checking -> {
-                                ConnectionCheckStatus()
-                                TextButton(onClick = {
-                                    checkJob?.cancel()
-                                    validator.cancel()
-                                    check = ConnectionCheckUiState()
-                                }, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("Cancel check") }
-                            }
-
-                            ConnectionCheckPhase.Verified -> {
-                                ListItem(
-                                    headlineContent = {
-                                        Text(
-                                            if (key.isBlank()) "Connection verified" else "API key verified",
-                                        )
-                                    },
-                                    supportingContent = {
-                                        Text(
-                                            "${check.modelName} accepted the check. Your connection is saved.",
-                                        )
-                                    },
-                                    leadingContent = {
-                                        Icon(
-                                            Icons.Outlined.CheckCircleOutline,
-                                            null,
-                                            tint = cs.primary,
-                                        )
-                                    },
-                                    colors = ListItemDefaults.colors(containerColor = cs.surfaceContainerLow),
-                                )
-                                Button(
-                                    onClick = dismiss,
-                                    modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp),
-                                    shape = MaterialTheme.shapes.extraLarge,
-                                ) {
-                                    Text("Done")
-                                }
-                                TextButton(onClick = {
-                                    check = ConnectionCheckUiState()
-                                }, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) { Text("Edit connection") }
-                            }
-
-                            ConnectionCheckPhase.Editing -> {
-                                ProviderChoices(selected, onSelect = { p ->
-                                    selected = p
-                                    url = vm.savedEndpoint(p)
-                                    key = vm.savedKey(p)
-                                    problem = null
-                                    manualModel =
-                                        ""
-                                    showManualModel = false
-                                    check = ConnectionCheckUiState()
-                                })
-                                OutlinedTextField(
-                                    value = url,
-                                    onValueChange = {
-                                        url = it
-                                        problem = null
-                                        check = ConnectionCheckUiState()
-                                    },
-                                    label = {
-                                        Text("Base URL")
-                                    },
-                                    leadingIcon = {
-                                        Icon(Icons.Outlined.Link, null)
-                                    },
-                                    modifier = Modifier.fillMaxWidth(),
-                                    singleLine = true,
-                                    shape = MaterialTheme.shapes.medium,
-                                    keyboardOptions =
-                                        KeyboardOptions(
-                                            keyboardType = KeyboardType.Uri,
-                                        ),
-                                )
-                                OutlinedTextField(
-                                    value = key,
-                                    onValueChange = {
-                                        key = it
-                                        problem = null
-                                        check = ConnectionCheckUiState()
-                                    },
-                                    label = {
-                                        Text(if (selected.keyRequired) "API key" else "API key (optional)")
-                                    },
-                                    leadingIcon = {
-                                        Icon(Icons.Outlined.Key, null)
-                                    },
-                                    modifier = Modifier.fillMaxWidth(),
-                                    singleLine = true,
-                                    shape = MaterialTheme.shapes.medium,
-                                    visualTransformation =
-                                        if (reveal) VisualTransformation.None else PasswordVisualTransformation(),
-                                    trailingIcon = {
-                                        IconButton(onClick = {
-                                            reveal =
-                                                !reveal
-                                        }) {
-                                            Icon(
-                                                if (reveal) Icons.Outlined.VisibilityOff else Icons.Outlined.Visibility,
-                                                if (reveal) "Hide API key" else "Show API key",
-                                            )
-                                        }
-                                    },
-                                )
-                                if (showManualModel) {
-                                    OutlinedTextField(
-                                        value = manualModel,
-                                        onValueChange = {
-                                            manualModel = it
-                                            check = ConnectionCheckUiState()
-                                        },
-                                        label = { Text("Model ID (optional)") },
-                                        singleLine = true,
-                                        shape = MaterialTheme.shapes.medium,
-                                        modifier = Modifier.fillMaxWidth(),
-                                    )
-                                } else {
-                                    TextButton(
-                                        onClick = {
-                                            manualModel = preferredModel()
-                                            showManualModel = true
-                                        },
-                                        modifier =
-                                            Modifier.fillMaxWidth().heightIn(
-                                                min = 48.dp,
-                                            ),
-                                    ) { Text("Use a model ID") }
-                                }
-                                problem?.let { Text(it, color = cs.error, style = MaterialTheme.typography.bodyMedium) }
-                                if (check.message.isNotBlank()) {
-                                    Text(
-                                        check.message,
-                                        color = cs.error,
-                                        style = MaterialTheme.typography.bodyMedium,
-                                    )
-                                }
-                                Button(
-                                    onClick = {
-                                        problem = formProblem()
-                                        if (problem == null) {
-                                            keyboard?.hide()
-                                            val provider = selected
-                                            val endpoint = url.trim()
-                                            val credential = key.trim()
-                                            val model = preferredModel()
-                                            check = ConnectionCheckUiState(ConnectionCheckPhase.Checking)
-                                            checkJob =
-                                                scope.launch {
-                                                    try {
-                                                        val verified =
-                                                            validator.verify(
-                                                                provider,
-                                                                endpoint,
-                                                                credential,
-                                                                model,
-                                                            )
-                                                        ensureActive()
-                                                        vm.configure(provider, endpoint, model, credential)
-                                                        if (manualModel.isNotBlank()) {
-                                                            vm.chooseModel(
-                                                                model,
-                                                                manual = true,
-                                                            )
-                                                        }
-                                                        check =
-                                                            ConnectionCheckUiState(
-                                                                ConnectionCheckPhase.Verified,
-                                                                modelName = verified.name,
-                                                            )
-                                                    } catch (e: CancellationException) {
-                                                        throw e
-                                                    } catch (e: Exception) {
-                                                        ensureActive()
-                                                        check =
-                                                            ConnectionCheckUiState(
-                                                                message =
-                                                                    if (e is java.io.IOException || e is IllegalArgumentException) {
-                                                                        e.message ?: "Couldn’t verify the connection."
-                                                                    } else {
-                                                                        "Couldn’t verify the connection. Check the URL and try again."
-                                                                    },
-                                                            )
-                                                        if (check.message.contains("model", true)) {
-                                                            showManualModel =
-                                                                true
-                                                        }
-                                                    }
-                                                }
-                                        }
-                                    },
-                                    enabled = !vm.busy,
-                                    modifier =
-                                        Modifier.fillMaxWidth().heightIn(
-                                            min = 56.dp,
-                                        ),
-                                    shape = MaterialTheme.shapes.extraLarge,
-                                ) {
-                                    Icon(Icons.Outlined.VerifiedUser, null)
-                                    Spacer(Modifier.width(8.dp))
-                                    Text(if (check.message.isBlank()) "Check & save connection" else "Try again")
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
 }

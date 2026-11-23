@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="provider_nvidia">#609600</color>
+    <color name="provider_gemini">#557DF1</color>
+    <color name="provider_groq">#E05237</color>
+    <color name="provider_cerebras">#E65B31</color>
+    <color name="provider_openrouter">#8062CB</color>
+    <color name="provider_mistral">#DB7300</color>
+    <color name="provider_together">#5275D8</color>
+    <color name="provider_fireworks">#BD58A1</color>
+    <color name="provider_deepseek">#5676F2</color>
+</resources>

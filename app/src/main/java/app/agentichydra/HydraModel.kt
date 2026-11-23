@@ -54,6 +54,7 @@ data class Message(
     val finalResponse: Boolean = true,
     val thought: String = "",
     val quiz: QuizAttempt? = null,
+    val streamChunkStarts: List<Int> = emptyList(),
 ) {
     fun json() =
         JSONObject()
@@ -215,6 +216,61 @@ class HydraModel(
             .connectTimeout(20, TimeUnit.SECONDS)
             .readTimeout(120, TimeUnit.SECONDS)
             .build()
+    var enabledProviders by mutableStateOf(
+        Provider.entries.filter { prefs.getBoolean("provider_enabled_${it.name}", true) }.toSet(),
+    )
+        private set
+    private var connectionRevision by mutableIntStateOf(0)
+    val configuredProviders: List<Provider>
+        get() {
+            connectionRevision
+            return Provider.entries.filter {
+                savedKey(it).isNotBlank() || (!it.keyRequired && prefs.contains("endpoint_${it.name}"))
+            }
+        }
+
+    fun setProviderEnabled(provider: Provider, enabled: Boolean) {
+        prefs.edit().putBoolean("provider_enabled_${provider.name}", enabled).apply()
+        enabledProviders = if (enabled) enabledProviders + provider else enabledProviders - provider
+    }
+
+    fun isConnectionVerified(provider: Provider): Boolean {
+        connectionRevision
+        return prefs.getBoolean("connection_verified_${provider.name}", false)
+    }
+
+    internal fun invalidateConnectionChecks(providers: Collection<Provider>) {
+        if (providers.isEmpty()) return
+        prefs.edit().apply {
+            providers.forEach { remove("connection_verified_${it.name}") }
+        }.apply()
+        connectionRevision++
+    }
+
+    fun saveConnection(provider: Provider, url: String, model: String, key: String, manual: Boolean) {
+        if (provider == this.provider) {
+            configure(provider, url, model, key)
+            if (manual) chooseModel(model, manual = true)
+            prefs.edit().putBoolean("connection_verified_${provider.name}", true).apply()
+            connectionRevision++
+            return
+        }
+        val endpoint = url.trim().trimEnd('/')
+        vault.write(provider.name, key)
+        prefs.edit()
+            .putBoolean("connection_verified_${provider.name}", true)
+            .putString("endpoint_${provider.name}", endpoint)
+            .putString("model_${provider.name}", model)
+            .apply {
+                if (manual) {
+                    putString("manual_model_${provider.name}", model)
+                    putString("manual_endpoint_${provider.name}", endpoint)
+                }
+            }
+            .apply()
+        connectionRevision++
+    }
+
     var provider by mutableStateOf(
         runCatching {
             Provider.valueOf(prefs.getString("provider", "NIM")!!)
@@ -346,6 +402,7 @@ class HydraModel(
             .putString("endpoint_${p.name}", endpoint)
             .putString("model_${p.name}", model)
             .apply()
+        connectionRevision++
         effort = prefs.getString("effort_${p.name}_$model", "auto")!!
         loadCatalog()
         if (changed) recordModelChange(force = true, oldModel = oldModel, oldProvider = oldProvider)
@@ -716,14 +773,13 @@ class HydraModel(
                 var streamText = ""
                 var streamThought = ""
                 var lastDraftPush = 0L
-                var pendingDraftText: String? = null
-                var pendingDraftThought: String? = null
+                var pendingDraft: StreamDraft? = null
                 var draftFlushJob: Job? = null
 
                 suspend fun dispatchDraft(
-                    snapshot: String,
-                    thoughtSnapshot: String,
+                    draft: StreamDraft,
                 ) {
+                    val (snapshot, thoughtSnapshot, chunkStarts) = draft
                     val existing = streamDraftId
                     if (existing == null) {
                         val draft =
@@ -734,6 +790,7 @@ class HydraModel(
                                 modelName = selectedModel.name,
                                 providerName = requestProvider.label,
                                 thought = thoughtSnapshot,
+                                streamChunkStarts = chunkStarts,
                                 finalResponse = false,
                             )
                         streamDraftId = draft.id
@@ -748,7 +805,7 @@ class HydraModel(
                                 messages =
                                     messages.map {
                                         if (it.id == existing) {
-                                            it.copy(text = snapshot, thought = thoughtSnapshot, finalResponse = false)
+                                            it.copy(text = snapshot, thought = thoughtSnapshot, finalResponse = false, streamChunkStarts = chunkStarts)
                                         } else {
                                             it
                                         }
@@ -759,8 +816,7 @@ class HydraModel(
                 }
 
                 suspend fun publishDraft(
-                    snapshot: String,
-                    thoughtSnapshot: String = "",
+                    draft: StreamDraft,
                 ) {
                     val now = android.os.SystemClock.elapsedRealtime()
                     val isFirst = streamDraftId == null
@@ -768,18 +824,15 @@ class HydraModel(
                         draftFlushJob?.cancel()
                         draftFlushJob = null
                         lastDraftPush = now
-                        dispatchDraft(snapshot, thoughtSnapshot)
+                        dispatchDraft(draft)
                     } else {
-                        pendingDraftText = snapshot
-                        pendingDraftThought = thoughtSnapshot
+                        pendingDraft = draft
                         if (draftFlushJob?.isActive != true) {
                             draftFlushJob =
                                 viewModelScope.launch {
                                     delay(32L)
-                                    val pText = pendingDraftText ?: snapshot
-                                    val pThought = pendingDraftThought ?: thoughtSnapshot
                                     lastDraftPush = android.os.SystemClock.elapsedRealtime()
-                                    dispatchDraft(pText, pThought)
+                                    dispatchDraft(pendingDraft ?: draft)
                                 }
                         }
                     }
@@ -808,6 +861,7 @@ class HydraModel(
                                         remove("tool_choice")
                                     }
                                 }
+                            val chunks = StreamChunkTail()
                             val turn =
                                 WorkStreamTurn(
                                     client,
@@ -840,11 +894,12 @@ class HydraModel(
                                     },
                                     onThought = { thoughtChunk ->
                                         streamThought = thoughtChunk
-                                        publishDraft(streamText, thoughtChunk)
+                                        publishDraft(chunks.snapshot(streamText, thoughtChunk))
                                     },
                                 ) { snapshot ->
                                     streamText = snapshot
-                                    publishDraft(snapshot, streamThought)
+                                    chunks.append(snapshot)
+                                    publishDraft(chunks.snapshot(snapshot, streamThought))
                                 }
                             val response = turn.run()
                             if (turn.droppedTools) {
