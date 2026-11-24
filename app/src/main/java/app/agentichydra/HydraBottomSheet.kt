@@ -51,12 +51,18 @@ fun HydraBottomSheet(
     lock: Boolean = false,
     fillHeight: Boolean = false,
     swipeEnabled: Boolean = true,
+    dismissible: Boolean = true,
     onBackRequest: (() -> Unit)? = null,
     heading: (@Composable ColumnScope.(dismiss: () -> Unit) -> Unit)? = null,
     content: @Composable ColumnScope.(dismiss: () -> Unit) -> Unit,
 ) {
     if (swipeEnabled) {
-        val state = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+        var allowHide by remember { mutableStateOf(false) }
+        val state =
+            rememberModalBottomSheetState(
+                skipPartiallyExpanded = true,
+                confirmValueChange = { dismissible || allowHide || it != SheetValue.Hidden },
+            )
         val scope = rememberCoroutineScope()
         val keyboard = LocalSoftwareKeyboardController.current
         var closing by remember { mutableStateOf(false) }
@@ -65,19 +71,21 @@ fun HydraBottomSheet(
         val dismiss: () -> Unit = {
             if (!closing) {
                 closing = true
+                allowHide = true
                 keyboard?.hide()
                 scope.launch {
                     try {
                         state.hide()
                         if (!state.isVisible) latestDismiss()
                     } finally {
+                        allowHide = false
                         closing = false
                     }
                 }
             }
         }
         ModalBottomSheet(
-            onDismissRequest = { (latestBack ?: latestDismiss)() },
+            onDismissRequest = { if (dismissible) (latestBack ?: latestDismiss)() },
             modifier =
                 Modifier
                     .windowInsetsPadding(
@@ -86,6 +94,7 @@ fun HydraBottomSheet(
             sheetState = state,
             containerColor = containerColor,
             dragHandle = null,
+            properties = ModalBottomSheetProperties(shouldDismissOnBackPress = dismissible),
             contentWindowInsets = { if (lock) WindowInsets(0, 0, 0, 0) else BottomSheetDefaults.windowInsets },
         ) {
             SheetBody(fillHeight, lock, heading, content, dismiss, state)

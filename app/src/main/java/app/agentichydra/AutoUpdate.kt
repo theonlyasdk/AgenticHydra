@@ -35,6 +35,19 @@ private const val DOWNLOADED_TAG_KEY = "downloadedTag"
 internal const val UPDATE_APK_NAME = "hydra-update.apk"
 private const val USER_AGENT = "Hydra-Updater"
 
+private val updateHttpClient: OkHttpClient by lazy {
+    OkHttpClient.Builder()
+        .connectTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
+        .readTimeout(60, java.util.concurrent.TimeUnit.SECONDS)
+        .build()
+}
+
+internal sealed interface UpdateCheckResult {
+    data class Available(val info: UpdateInfo) : UpdateCheckResult
+    object UpToDate : UpdateCheckResult
+    data class Failed(val message: String) : UpdateCheckResult
+}
+
 internal fun updatesEnabled(context: Context): Boolean =
     context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).getBoolean("autoUpdate", true)
 
@@ -75,15 +88,29 @@ internal fun appVersionName(context: Context): String =
 
 /** The newest published release newer than the running version, or null when there is none. */
 internal fun checkForUpdate(context: Context): UpdateInfo? =
-    runCatching { fetchLatestRelease() }
-        .getOrNull()
-        ?.let { info -> info.takeIf { isNewerVersion(info.versionName, appVersionName(context)) } }
+    (checkForUpdateResult(context) as? UpdateCheckResult.Available)?.info
+
+/** Checks GitHub for a newer release, distinguishing up-to-date from network or server failures. */
+internal fun checkForUpdateResult(context: Context): UpdateCheckResult {
+    val info =
+        try {
+            fetchLatestRelease(updateHttpClient)
+        } catch (_: Exception) {
+            return UpdateCheckResult.Failed("Could not reach GitHub. Check your connection and try again.")
+        }
+            ?: return UpdateCheckResult.Failed("No published release found.")
+    return if (isNewerVersion(info.versionName, appVersionName(context))) {
+        UpdateCheckResult.Available(info)
+    } else {
+        UpdateCheckResult.UpToDate
+    }
+}
 
 /**
  * The latest non-draft, non-prerelease release published on GitHub, or null when none is
  * found. [client] and [url] are parameters so unit tests can point them at a local server.
  */
-internal fun fetchLatestRelease(client: OkHttpClient = OkHttpClient(), url: String = RELEASES_URL): UpdateInfo? {
+internal fun fetchLatestRelease(client: OkHttpClient = updateHttpClient, url: String = RELEASES_URL): UpdateInfo? {
     val request =
         Request.Builder()
             .url(url)
@@ -177,7 +204,7 @@ private fun verifyChecksum(info: UpdateInfo, file: File): Boolean {
     val url = info.checksumUrl ?: return true
     val sums =
         runCatching {
-            OkHttpClient().newCall(Request.Builder().url(url).header("User-Agent", USER_AGENT).build())
+            updateHttpClient.newCall(Request.Builder().url(url).header("User-Agent", USER_AGENT).build())
                 .execute().use { response -> if (response.isSuccessful) response.body?.string() else null }
         }.getOrNull() ?: return false
     val expected = expectedSha256(sums, info.assetName) ?: return false
@@ -194,7 +221,7 @@ internal suspend fun downloadUpdate(context: Context, info: UpdateInfo, onProgre
     file.delete()
     try {
         val request = Request.Builder().url(info.downloadUrl).header("User-Agent", USER_AGENT).build()
-        OkHttpClient().newCall(request).execute().use { response ->
+        updateHttpClient.newCall(request).execute().use { response ->
             if (!response.isSuccessful) return null
             val body = response.body ?: return null
             val total = body.contentLength()
@@ -244,11 +271,11 @@ internal fun installUpdateApk(context: Context, apkFile: File) {
         FileInputStream(apkFile).use { input -> input.copyTo(out) }
         session.fsync(out)
         out.close()
-        val statusIntent = Intent(context, InstallStatusReceiver::class.java)
+        val statusIntent = Intent(context, InstallStatusReceiver::class.java).setPackage(context.packageName)
         val pending =
             PendingIntent.getBroadcast(
                 context,
-                0,
+                sessionId,
                 statusIntent,
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_MUTABLE,
             )
@@ -284,6 +311,9 @@ class InstallStatusReceiver : BroadcastReceiver() {
                 } else {
                     Toast.makeText(context, "The update needs your confirmation in the system installer.", Toast.LENGTH_LONG).show()
                 }
+            }
+            PackageInstaller.STATUS_FAILURE_ABORTED -> {
+                Toast.makeText(context, "Update cancelled.", Toast.LENGTH_SHORT).show()
             }
             else -> {
                 val detail = intent.getStringExtra(PackageInstaller.EXTRA_STATUS_MESSAGE)?.trim()

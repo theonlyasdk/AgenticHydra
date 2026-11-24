@@ -3,7 +3,10 @@ package app.agentichydra
 import android.content.res.Configuration
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
@@ -11,6 +14,7 @@ import androidx.compose.material.icons.outlined.Update
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.ListItemDefaults
 import androidx.compose.material3.MaterialTheme
@@ -19,6 +23,8 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -26,8 +32,13 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalInspectionMode
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import java.io.File
@@ -64,63 +75,115 @@ internal class UpdateDialogState(val info: UpdateInfo, val apk: File)
 @Composable
 internal fun AutoUpdateCard() {
     val context = LocalContext.current
+    val inspection = LocalInspectionMode.current
     val scope = rememberCoroutineScope()
     val cs = MaterialTheme.colorScheme
     var enabled by remember { mutableStateOf(updatesEnabled(context)) }
     var status by remember { mutableStateOf<UpdateStatus>(UpdateStatus.None) }
-    var showInstallPermission by remember { mutableStateOf(false) }
+    var showUpdateSheet by remember { mutableStateOf(false) }
+    var hasInstallPermission by remember { mutableStateOf(if (inspection) true else canInstallUpdates(context)) }
 
-    fun checkNow() {
-        scope.launch(Dispatchers.IO) {
-            status = UpdateStatus.Checking
-            val info = checkForUpdate(context)
-            status = info?.let { UpdateStatus.UpdateAvailable(it) } ?: UpdateStatus.NoUpdate
+    if (!inspection) {
+        val lifecycleOwner = LocalLifecycleOwner.current
+        DisposableEffect(lifecycleOwner) {
+            val observer =
+                LifecycleEventObserver { _, event ->
+                    if (event == Lifecycle.Event.ON_RESUME) {
+                        hasInstallPermission = canInstallUpdates(context)
+                    }
+                }
+            lifecycleOwner.lifecycle.addObserver(observer)
+            onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
         }
     }
 
-    fun installNow() {
+    fun checkNow() {
         if (status is UpdateStatus.Checking || status is UpdateStatus.Downloading) return
-        if (!canInstallUpdates(context)) {
-            showInstallPermission = true
-            return
-        }
-        if (status is UpdateStatus.UpdateReady) {
-            scope.launch(Dispatchers.IO) {
-                try {
-                    installUpdateApk(context, File(context.filesDir, UPDATE_APK_NAME))
-                } catch (_: Exception) {
-                    status =
-                        UpdateStatus.Error("The update could not be installed. Check your phone’s install settings and try again.")
-                }
-            }
-            return
-        }
-        val available = status as? UpdateStatus.UpdateAvailable ?: return
         scope.launch(Dispatchers.IO) {
-            val apk =
-                stagedUpdateApk(context, available.info) ?: run {
-                    var fraction = 0f
-                    downloadUpdate(context, available.info) { downloaded, total ->
-                        val next = if (total > 0) (downloaded.toFloat() / total).coerceIn(0f, 1f) else 0f
-                        if (next != fraction) {
-                            fraction = next
-                            status = UpdateStatus.Downloading(next)
+            status = UpdateStatus.Checking
+            status =
+                when (val result = checkForUpdateResult(context)) {
+                    is UpdateCheckResult.Available ->
+                        if (stagedUpdateApk(context, result.info) != null) {
+                            UpdateStatus.UpdateReady(result.info)
+                        } else {
+                            UpdateStatus.UpdateAvailable(result.info)
+                        }
+                    UpdateCheckResult.UpToDate -> UpdateStatus.NoUpdate
+                    is UpdateCheckResult.Failed -> UpdateStatus.Error(result.message)
+                }
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        if (!inspection && enabled && status == UpdateStatus.None) {
+            checkNow()
+        }
+    }
+
+    fun startDownloadFlow() {
+        if (status is UpdateStatus.Checking || status is UpdateStatus.Downloading) return
+        showUpdateSheet = true
+        scope.launch(Dispatchers.IO) {
+            val ready = status as? UpdateStatus.UpdateReady
+            if (ready != null && stagedUpdateApk(context, ready.info) != null) {
+                return@launch
+            }
+            val availableInfo =
+                (status as? UpdateStatus.UpdateAvailable)?.info ?: run {
+                    status = UpdateStatus.Checking
+                    when (val result = checkForUpdateResult(context)) {
+                        is UpdateCheckResult.Available -> result.info
+                        UpdateCheckResult.UpToDate -> {
+                            status = UpdateStatus.NoUpdate
+                            return@launch
+                        }
+                        is UpdateCheckResult.Failed -> {
+                            status = UpdateStatus.Error(result.message)
+                            return@launch
                         }
                     }
                 }
-            status =
-                if (apk == null) {
-                    UpdateStatus.Error("The update could not be downloaded or verified. Check your connection and try again.")
-                } else {
-                    UpdateStatus.UpdateReady(available.info)
+            val existing = stagedUpdateApk(context, availableInfo)
+            if (existing != null) {
+                status = UpdateStatus.UpdateReady(availableInfo)
+                return@launch
+            }
+            status = UpdateStatus.Downloading(0f)
+            var fraction = 0f
+            val apk =
+                downloadUpdate(context, availableInfo) { downloaded, total ->
+                    val next = if (total > 0) (downloaded.toFloat() / total).coerceIn(0f, 1f) else 0f
+                    if (next != fraction) {
+                        fraction = next
+                        status = UpdateStatus.Downloading(next)
+                    }
                 }
+            if (apk == null) {
+                status = UpdateStatus.Error("The update could not be downloaded or verified. Check your connection and try again.")
+            } else {
+                hasInstallPermission = canInstallUpdates(context)
+                status = UpdateStatus.UpdateReady(availableInfo)
+            }
+        }
+    }
+
+    fun installDownloaded() {
+        val ready = status as? UpdateStatus.UpdateReady ?: return
+        scope.launch(Dispatchers.IO) {
+            try {
+                installUpdateApk(context, File(context.filesDir, UPDATE_APK_NAME))
+                showUpdateSheet = false
+            } catch (_: Exception) {
+                status = UpdateStatus.Error("The update could not be installed. Check your phone’s install settings and try again.")
+            }
         }
     }
 
     Surface(color = cs.surfaceContainerHigh, shape = MaterialTheme.shapes.large) {
         Column(
             Modifier.fillMaxWidth().padding(12.dp),
-            verticalArrangement = Arrangement.spacedBy(4.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             ListItem(
                 headlineContent = { Text("Auto update") },
@@ -139,29 +202,164 @@ internal fun AutoUpdateCard() {
                 colors = ListItemDefaults.colors(containerColor = cs.surfaceContainerHigh),
             )
             status.description()?.let { text ->
-                Text(text, style = MaterialTheme.typography.bodySmall, color = cs.onSurfaceVariant)
+                Text(
+                    text,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = cs.onSurfaceVariant,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp),
+                )
             }
             when (status) {
-                is UpdateStatus.UpdateAvailable, is UpdateStatus.UpdateReady ->
+                is UpdateStatus.UpdateAvailable ->
                     Button(
-                        onClick = { installNow() },
+                        onClick = { startDownloadFlow() },
                         modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
                     ) {
-                        Text(if (status is UpdateStatus.UpdateReady) "Install now" else "Download and install")
+                        Text("Download")
                     }
-                else -> {}
+                is UpdateStatus.UpdateReady ->
+                    Button(
+                        onClick = { showUpdateSheet = true },
+                        modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
+                    ) {
+                        Text("Install")
+                    }
+                UpdateStatus.Checking, is UpdateStatus.Downloading -> {}
+                else ->
+                    TextButton(
+                        onClick = { checkNow() },
+                        modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
+                    ) {
+                        Text("Check for updates")
+                    }
             }
         }
     }
 
-    if (showInstallPermission) {
-        InstallPermissionDialog(
-            onOpenSettings = {
-                showInstallPermission = false
-                runCatching { context.startActivity(installPermissionSettingsIntent(context)) }
-            },
-            onDismiss = { showInstallPermission = false },
-        )
+    if (showUpdateSheet) {
+        HydraBottomSheet(
+            onDismiss = { showUpdateSheet = false },
+            dismissible = false,
+        ) { dismiss ->
+            Column(
+                Modifier.fillMaxWidth().padding(horizontal = 24.dp).padding(bottom = 24.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                when (val current = status) {
+                    UpdateStatus.Checking -> {
+                        Text("Checking for updates", style = MaterialTheme.typography.titleLarge)
+                        LinearProgressIndicator(Modifier.fillMaxWidth())
+                    }
+                    is UpdateStatus.Downloading -> {
+                        val pct = (current.fraction * 100).roundToInt()
+                        Text(
+                            if (pct > 0) "Downloading update ($pct%)" else "Downloading update",
+                            style = MaterialTheme.typography.titleLarge,
+                        )
+                        if (current.fraction > 0f) {
+                            LinearProgressIndicator(
+                                progress = { current.fraction },
+                                modifier = Modifier.fillMaxWidth(),
+                            )
+                        } else {
+                            LinearProgressIndicator(Modifier.fillMaxWidth())
+                        }
+                    }
+                    is UpdateStatus.UpdateReady -> {
+                        if (!hasInstallPermission) {
+                            Text("Allow installing updates", style = MaterialTheme.typography.titleLarge)
+                            Text(
+                                "Turn on “Install unknown apps” for Hydra in system settings, then return here to install.",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = cs.onSurfaceVariant,
+                            )
+                            Spacer(Modifier.height(4.dp))
+                            Row(
+                                Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                            ) {
+                                TextButton(
+                                    onClick = dismiss,
+                                    modifier = Modifier.weight(1f).heightIn(min = 48.dp),
+                                ) {
+                                    Text("Later")
+                                }
+                                Button(
+                                    onClick = {
+                                        runCatching { context.startActivity(installPermissionSettingsIntent(context)) }
+                                    },
+                                    modifier = Modifier.weight(1f).heightIn(min = 48.dp),
+                                ) {
+                                    Text("Open settings")
+                                }
+                            }
+                        } else {
+                            Text("Ready to install", style = MaterialTheme.typography.titleLarge)
+                            Text(
+                                "Version ${current.info.versionName} is downloaded and ready.",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = cs.onSurfaceVariant,
+                            )
+                            Spacer(Modifier.height(4.dp))
+                            Row(
+                                Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                            ) {
+                                TextButton(
+                                    onClick = dismiss,
+                                    modifier = Modifier.weight(1f).heightIn(min = 48.dp),
+                                ) {
+                                    Text("Later")
+                                }
+                                Button(
+                                    onClick = { installDownloaded() },
+                                    modifier = Modifier.weight(1f).heightIn(min = 48.dp),
+                                ) {
+                                    Text("Install")
+                                }
+                            }
+                        }
+                    }
+                    UpdateStatus.NoUpdate -> {
+                        Text("Up to date", style = MaterialTheme.typography.titleLarge)
+                        Text(
+                            "You’re on the latest version.",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = cs.onSurfaceVariant,
+                        )
+                        Button(
+                            onClick = dismiss,
+                            modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
+                        ) {
+                            Text("Close")
+                        }
+                    }
+                    is UpdateStatus.Error -> {
+                        Text("Update failed", style = MaterialTheme.typography.titleLarge)
+                        Text(
+                            current.message,
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = cs.onSurfaceVariant,
+                        )
+                        Button(
+                            onClick = dismiss,
+                            modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
+                        ) {
+                            Text("Close")
+                        }
+                    }
+                    else -> {
+                        Button(
+                            onClick = dismiss,
+                            modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
+                        ) {
+                            Text("Close")
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
