@@ -1,10 +1,10 @@
 package app.agentichydra.mcp
 
 import android.content.Context
-import android.content.Intent
 import android.net.Uri
 import androidx.browser.customtabs.CustomTabsIntent
 import app.agentichydra.KeyVault
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -53,15 +53,16 @@ class McpAuth(private val context: Context) {
         )
         val callbacks: SharedFlow<OAuthCallback> = _callbacks.asSharedFlow()
 
-        private val pendingCallback = java.util.concurrent.atomic.AtomicReference<kotlinx.coroutines.CompletableDeferred<OAuthCallback>?>(null)
+        private class PendingCallback(val state: String, val result: CompletableDeferred<OAuthCallback>)
+
+        private val pendingCallback = java.util.concurrent.atomic.AtomicReference<PendingCallback?>(null)
 
         fun deliverCallback(cb: OAuthCallback) {
-            pendingCallback.getAndSet(null)?.complete(cb)
+            val pending = pendingCallback.get()
+            if (pending != null && cb.state == pending.state && pendingCallback.compareAndSet(pending, null)) {
+                pending.result.complete(cb)
+            }
             _callbacks.tryEmit(cb)
-        }
-
-        fun setPending(deferred: kotlinx.coroutines.CompletableDeferred<OAuthCallback>) {
-            pendingCallback.set(deferred)
         }
     }
 
@@ -76,11 +77,10 @@ class McpAuth(private val context: Context) {
             "$origin/.well-known/oauth-protected-resource",
         )
         for (c in prmCandidates) {
-            val r = httpGet(c)
-            if (r.isSuccessful) {
-                val j = JSONObject(r.body!!.string())
-                val servers = j.optJSONArray("authorization_servers")
-                if (servers != null && servers.length() > 0) { asUrl = servers.getString(0); break }
+            val servers = discoverMetadata(c)?.optJSONArray("authorization_servers")
+            if (servers != null && servers.length() > 0) {
+                asUrl = servers.getString(0)
+                break
             }
         }
         val base = asUrl ?: origin
@@ -92,9 +92,8 @@ class McpAuth(private val context: Context) {
             "$baseOrigin/.well-known/oauth-authorization-server",
         )
         for (c in asmCandidates) {
-            val r = httpGet(c)
-            if (r.isSuccessful) {
-                val j = JSONObject(r.body!!.string())
+            val j = discoverMetadata(c)
+            if (j != null) {
                 return AsMetadata(
                     issuer = j.optString("issuer", base),
                     authorizationEndpoint = j.getString("authorization_endpoint"),
@@ -131,9 +130,7 @@ class McpAuth(private val context: Context) {
         val req = Request.Builder().url(ep)
             .post(body.toString().toRequestBody("application/json".toMediaType()))
             .build()
-        val resp = client.newCall(req).execute()
-        if (!resp.isSuccessful) throw RuntimeException("DCR failed: ${resp.code} ${resp.body?.string()}")
-        val j = JSONObject(resp.body!!.string())
+        val j = postJson(req, "DCR failed")
         return j.getString("client_id")
     }
 
@@ -183,9 +180,7 @@ class McpAuth(private val context: Context) {
             .add("resource", resource)
             .build()
         val req = Request.Builder().url(metadata.tokenEndpoint).post(form).build()
-        val resp = client.newCall(req).execute()
-        if (!resp.isSuccessful) throw RuntimeException("Token exchange failed: ${resp.code} ${resp.body?.string()}")
-        val j = JSONObject(resp.body!!.string())
+        val j = postJson(req, "Token exchange failed")
         return TokenResponse(
             accessToken = j.getString("access_token"),
             refreshToken = j.optStringOrNull("refresh_token"),
@@ -202,9 +197,7 @@ class McpAuth(private val context: Context) {
             .add("resource", resource)
             .build()
         val req = Request.Builder().url(metadata.tokenEndpoint).post(form).build()
-        val resp = client.newCall(req).execute()
-        if (!resp.isSuccessful) throw RuntimeException("Refresh failed: ${resp.code} ${resp.body?.string()}")
-        val j = JSONObject(resp.body!!.string())
+        val j = postJson(req, "Refresh failed")
         return TokenResponse(
             accessToken = j.getString("access_token"),
             refreshToken = j.optStringOrNull("refresh_token") ?: refreshToken,
@@ -219,10 +212,16 @@ class McpAuth(private val context: Context) {
         context.startActivity(intent)
     }
 
-    suspend fun awaitCallback(timeoutMs: Long = 300_000): OAuthCallback {
-        val deferred = kotlinx.coroutines.CompletableDeferred<OAuthCallback>()
-        McpAuth.setPending(deferred)
-        return withTimeout(timeoutMs) { deferred.await() }
+    suspend fun awaitCallback(state: String, timeoutMs: Long = 300_000, launch: () -> Unit): OAuthCallback {
+        val pending = PendingCallback(state, CompletableDeferred())
+        pendingCallback.getAndSet(pending)?.result?.cancel()
+        return try {
+            launch()
+            withTimeout(timeoutMs) { pending.result.await() }
+        } finally {
+            pendingCallback.compareAndSet(pending, null)
+            pending.result.cancel()
+        }
     }
 
     fun storeTokens(serverId: String, access: String, refresh: String?) {
@@ -246,7 +245,16 @@ class McpAuth(private val context: Context) {
         }
     }
 
-    private fun httpGet(url: String): okhttp3.Response = client.newCall(Request.Builder().url(url).get().build()).execute()
+    private fun discoverMetadata(url: String): JSONObject? =
+        client.newCall(Request.Builder().url(url).build()).execute().use { response ->
+            if (response.isSuccessful) JSONObject(response.body!!.string()) else null
+        }
+
+    private fun postJson(request: Request, failure: String): JSONObject =
+        client.newCall(request).execute().use { response ->
+            if (!response.isSuccessful) error("$failure: ${response.code}")
+            JSONObject(response.body!!.string())
+        }
 
     private fun randomString(len: Int): String {
         val chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~"

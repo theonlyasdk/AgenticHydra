@@ -80,8 +80,8 @@ enum class ApprovalMode(
 ) {
     EVERY("Ask every time", "Approve file reads, changes, commands, and web access."),
     CHANGES("Ask for changes", "Read and search freely; approve changes and every shell command."),
-    SESSION("Allow next task", "Allow all tools for the next turn; reset afterward."),
-    FULL("Full access", "Allow tools, file changes, and commands without asking. Stays enabled until changed."),
+    SESSION("Allow next task", "Allow tools for the next turn. Shell commands still ask."),
+    FULL("Full access", "Allow tools and file changes without asking. Shell commands still ask."),
 }
 
 object ToolPolicy {
@@ -113,14 +113,25 @@ object ToolPolicy {
         return parts
     }
 
+    fun requireWritablePath(path: String) {
+        val protectedDirectories = setOf(".git", ".ssh", ".gnupg", ".aws", ".codex", ".agents")
+        val protectedFiles = setOf("local.properties", "credentials.json", "secrets.json", "secrets.properties")
+        require(parts(path).none { segment ->
+            val name = segment.lowercase()
+            name in protectedDirectories || name in protectedFiles || name == ".env" ||
+                name.startsWith(".env.") || name.endsWith(".keystore") || name.endsWith(".jks") ||
+                name.endsWith(".pem") || name.endsWith(".key") || name.endsWith(".p12")
+        }) { "This project path is protected from agent changes." }
+    }
+
     fun isRead(tool: String): Boolean =
         tool in readTools || (app.agentichydra.mcp.McpToolRouter.registry?.readOnlyToolNames()?.contains(tool) == true)
 
     fun approval(
         mode: ApprovalMode,
         tool: String,
-    ) = tool !in setOf("ask_user", "quiz_user") &&
-        (mode == ApprovalMode.EVERY || (mode == ApprovalMode.CHANGES && !isRead(tool)))
+    ) = tool == "run_command" || (tool !in setOf("ask_user", "quiz_user") &&
+        (mode == ApprovalMode.EVERY || (mode == ApprovalMode.CHANGES && !isRead(tool))))
 }
 
 /** Live byte counters for a native file download. */
@@ -376,4 +387,107 @@ internal fun repairedWorkHistory(raw: String): JSONArray {
     }
     finishPending()
     return repaired
+}
+
+/**
+ * Slices an OpenAI-format API history array so it matches [keptMessages] up to its last entry.
+ */
+internal fun sliceApiHistoryForMessages(
+    history: JSONArray,
+    keptMessages: List<Message>,
+): JSONArray {
+    if (keptMessages.isEmpty()) return JSONArray()
+    if (history.length() == 0) {
+        return JSONArray().apply {
+            keptMessages
+                .filter { it.role == "user" || it.role == "assistant" }
+                .forEach { message ->
+                    put(
+                        JSONObject()
+                            .put("role", message.role)
+                            .put("content", message.text)
+                            .apply {
+                                if (message.role == "user" && message.attachments.isNotEmpty()) {
+                                    put("_hydra_message_id", message.id)
+                                }
+                            },
+                    )
+                }
+        }
+    }
+    val userCount = keptMessages.count { it.role == "user" }
+    if (userCount == 0) return JSONArray()
+    var seenUsers = 0
+    var hUserIdx = -1
+    for (i in 0 until history.length()) {
+        if (history.getJSONObject(i).optString("role") == "user") {
+            seenUsers++
+            if (seenUsers == userCount) {
+                hUserIdx = i
+                break
+            }
+        }
+    }
+    if (hUserIdx < 0) {
+        return sliceApiHistoryForMessages(JSONArray(), keptMessages)
+    }
+    val lastUserMsgIndex = keptMessages.indexOfLast { it.role == "user" }
+    val assistantAfterLastUser =
+        if (keptMessages.lastOrNull()?.role == "user") {
+            0
+        } else {
+            keptMessages.drop(lastUserMsgIndex + 1).count { it.role == "assistant" }
+        }
+    var endIndex = hUserIdx
+    if (assistantAfterLastUser > 0) {
+        var seenAssistants = 0
+        for (i in (hUserIdx + 1) until history.length()) {
+            val role = history.getJSONObject(i).optString("role")
+            if (role == "user") break
+            endIndex = i
+            if (role == "assistant") {
+                seenAssistants++
+                if (seenAssistants == assistantAfterLastUser) break
+            }
+        }
+    }
+    val sliced = JSONArray()
+    for (i in 0..endIndex) sliced.put(history.getJSONObject(i))
+    return repairedWorkHistory(sliced.toString())
+}
+
+/** Replaces the content of the newest user entry in [history] with [updatedText]. */
+internal fun replaceLastUserPromptInHistory(
+    history: JSONArray,
+    updatedText: String,
+): JSONArray {
+    var lastUser = -1
+    for (i in 0 until history.length()) {
+        if (history.getJSONObject(i).optString("role") == "user") lastUser = i
+    }
+    if (lastUser < 0) return history
+    val out = JSONArray()
+    for (i in 0 until history.length()) {
+        val entry = history.getJSONObject(i)
+        if (i == lastUser) {
+            out.put(JSONObject(entry.toString()).put("content", updatedText))
+        } else {
+            out.put(entry)
+        }
+    }
+    return out
+}
+
+internal fun branchedConversationTitle(
+    baseTitle: String,
+    fallbackPrompt: String,
+    fallbackTitle: String,
+    maxLength: Int = 60,
+): String {
+    val clean = baseTitle.ifBlank { fallbackPrompt.lineSequence().firstOrNull().orEmpty() }.trim()
+    if (clean.isBlank()) return fallbackTitle
+    val suffix = " (branch)"
+    if (clean.endsWith(suffix)) return clean.take(maxLength)
+    val baseBudget = (maxLength - suffix.length).coerceAtLeast(1)
+    return clean.take(baseBudget).trimEnd() + suffix
 }

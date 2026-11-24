@@ -23,6 +23,7 @@ internal class ConversationNamer(
         reasoning: ReasoningProfile = ReasoningProfile(emptyList()),
         provider: Provider? = null,
         rateLimit: RateLimitPolicy = RateLimitPolicy(),
+        usageTask: UsageTask? = null,
     ): String {
         // Naming is a real provider request: it waits behind the same budget as the answer.
         if (rateLimit.prevent && provider != null) RequestPacer.acquire(provider, rateLimit.rpm)
@@ -60,7 +61,9 @@ internal class ConversationNamer(
                 if (!response.isSuccessful) throw IOException("Conversation naming unavailable")
                 response.body?.string().orEmpty()
             }
-        val message = JSONObject(body).assistantMessage()
+        val response = JSONObject(body)
+        if (provider != null) UsageLedger.record(usageTask, provider, model, response)
+        val message = response.assistantMessage()
         val content = if (message.isNull("content")) "" else message.getString("content")
         return cleanConversationTitle(content)
     }

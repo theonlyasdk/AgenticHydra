@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="quick_new_task">Hydra task</string>
+    <string name="quick_voice_task">Hydra voice</string>
+    <string name="widget_new_task">New task</string>
+    <string name="widget_voice_task">Voice query</string>
+</resources>

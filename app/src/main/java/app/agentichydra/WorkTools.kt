@@ -4,7 +4,10 @@ import org.json.JSONArray
 
 object WorkTools {
     /** Serialized size of the tool schemas, counted against the context window. */
-    val schemaChars: Long get() = schema().toString().length.toLong()
+    val schemaChars: Long
+        get() = baseSchemaChars + (app.agentichydra.mcp.McpToolRouter.registry?.toolSchemaChars ?: 0L)
+
+    private val baseSchemaChars by lazy { baseSchema().toString().length.toLong() }
 
     private val baseNames =
         buildList {
@@ -203,6 +206,10 @@ object WorkTools {
                         stringSchema(
                             "Complete, self-contained instruction for the task, maximum 2,000 characters. Include everything it needs because it cannot ask questions.",
                         ),
+                    "provider" to stringSchema(
+                        "Optional configured provider. Available names: ${Provider.entries.joinToString { it.name }}. Defaults to the current provider.",
+                    ),
+                    "model" to stringSchema("Optional model ID on the selected provider. Defaults to its saved model."),
                 ),
             ).put(
                 toolSchema(

@@ -8,11 +8,8 @@ import android.text.style.ForegroundColorSpan
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.expandVertically
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
-import androidx.compose.animation.slideInVertically
-import androidx.compose.animation.slideOutVertically
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -229,18 +226,19 @@ internal fun ChatFindBar(
     onNext: () -> Unit,
     onClose: () -> Unit,
     modifier: Modifier = Modifier,
+    active: Boolean = true,
 ) {
     val cs = MaterialTheme.colorScheme
     val requester = remember { FocusRequester() }
-    LaunchedEffect(requester) {
-        withFrameNanos { }
-        requester.requestFocus()
+    LaunchedEffect(requester, active) {
+        if (active) {
+            withFrameNanos { }
+            requester.requestFocus()
+        }
     }
     Surface(
         color = cs.surfaceContainerHigh,
         shape = MaterialTheme.shapes.large,
-        tonalElevation = 3.dp,
-        shadowElevation = 2.dp,
         modifier = modifier.testTag("chat-find-bar"),
     ) {
         Column(Modifier.fillMaxWidth()) {
@@ -282,10 +280,8 @@ internal fun ChatFindBar(
             AnimatedVisibility(
                 visible = query.isNotBlank(),
                 modifier = Modifier.clipToBounds(),
-                enter = slideInVertically(spring(stiffness = 600f)) { -it } +
-                    expandVertically(spring(stiffness = 600f), expandFrom = Alignment.Top) +
-                    fadeIn(spring(stiffness = 600f)),
-                exit = slideOutVertically(spring(stiffness = 600f)) { -it } + fadeOut(spring(stiffness = 600f)),
+                enter = expandVertically(spring(stiffness = 600f), expandFrom = Alignment.Top),
+                exit = shrinkVertically(spring(stiffness = 600f), shrinkTowards = Alignment.Top),
             ) {
                 Surface(
                     modifier = Modifier.fillMaxWidth(),

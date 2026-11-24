@@ -51,8 +51,51 @@ class WorkSearchTest {
         assertTrue(cache.get("key")!!.getBoolean("cached"))
         now = 300_001
         assertNull(cache.get("key"))
-        val bounded = JSONObject(boundedSearchJson(result, 1500))
+        val json = boundedSearchJson(result, 1500)
+        assertTrue(json.length <= 1500)
+        val bounded = JSONObject(json)
         assertTrue(bounded.getBoolean("truncated"))
         assertTrue(bounded.getJSONArray("results").length() < 10)
+    }
+
+    @Test
+    fun batchBudgetDropsTheTailOfTheLargestEncodedGroup() {
+        val longRow = JSONObject().put("snippet", "\"\n\t".repeat(500))
+        val first = JSONArray().put(JSONObject().put("snippet", "first")).put(longRow)
+        val second = JSONArray().put(JSONObject().put("snippet", "second").put("url", "https://example.org"))
+        val result = JSONObject().put(
+            "searches",
+            JSONArray().put(JSONObject().put("results", first)).put(JSONObject().put("results", second)),
+        )
+
+        val bounded = boundedSearchJson(result, 220)
+
+        assertTrue(bounded.length <= 220)
+        assertTrue(JSONObject(bounded).getBoolean("truncated"))
+        assertEquals("first", first.getJSONObject(0).getString("snippet"))
+        assertEquals(1, first.length())
+        assertEquals(1, second.length())
+    }
+
+    @Test
+    fun pageBudgetTracksEscapingAndKeepsPaginationAtTheLastCharacter() {
+        val offset = 999
+        val text = "</\\\"\r\n\t\u0001".repeat(1200)
+        val result = JSONObject()
+            .put("text", text)
+            .put("links", JSONArray().put("https://example.org/guide"))
+            .put("next_offset", JSONObject.NULL)
+
+        val bounded = boundedFetchedPage(result, offset)
+        val page = JSONObject(bounded)
+        val body = page.getString("text")
+        assertTrue(bounded.length <= 15500)
+        assertTrue(body.isNotEmpty() && body.length < text.length)
+        assertTrue(text.startsWith(body))
+        assertEquals(offset + body.length, page.getInt("next_offset"))
+        assertEquals(0, page.getJSONArray("links").length())
+        val oneMoreChunk = page.put("text", text.take(body.length + 500))
+            .put("next_offset", offset + body.length + 500)
+        assertTrue(oneMoreChunk.toString().length > 15500)
     }
 }

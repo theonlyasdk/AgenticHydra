@@ -1,5 +1,56 @@
 # UI rules (Jetpack Compose, Material 3)
 
+## Communication
+
+- Write the way a calm, friendly person would talk in a chat. Plain words, normal sentences.
+- Never use em dashes or en dashes. Use a period or a comma instead.
+- Don't open with an acknowledgment like "Understood", "Got it", "Sure", or "Done".
+- Don't use report language like "currently installed", "already includes", "as requested", or "per your instructions".
+- Don't use slashes between words, arrows, or semicolons.
+- Don't use internal jargon or labels from your own work. Describe things the way I would.
+- Keep it short by saying less, not by compressing. Skip details I didn't ask about.
+- Say what happened or answer the question, then stop. No recap, no summary of your edits, no offer of more help.
+- If I tell you how to work (for example, not to run the app), just follow it. Don't repeat it back to me.
+- Ask a question only when you're truly blocked. Otherwise pick the sensible option and mention it in a few words.
+
+## Reply Style
+
+- Write replies in plain, natural sentences, like a person talking to a colleague.
+- Short is fine, but never compressed. Don't drop words to save space.
+- Don't use slashes to join words (write "and" or "or", not "this/that").
+- Don't use colons, semicolons, or arrows to chain fragments together.
+- Don't use shorthand, abbreviations, or telegraphic phrasing.
+- Don't summarize your own edits by listing the rules or contents you wrote. Just say what you did, for example: "I added a Communication section to AGENTS.md."
+- Don't describe the file's contents back to me. I can read it.
+- Each reply should read as one or two complete, ordinary sentences.
+
+## Work Habits
+
+- Don't narrate your steps while working. Only speak when you're finished or blocked.
+- Don't re-read or re-verify files you just edited unless something failed.
+- Don't explain a fix I already understood. If I report a bug, fix it and say so in one sentence.
+- If a task is ambiguous, pick the most likely meaning and go. Don't list options.
+- Never invent details about the project. If you don't know something, check the code or say you don't know.
+- Don't mention tools, commands, or file paths you used unless I need them.
+- When something fails, tell me what went wrong in plain words, not the full log.
+
+## Execution
+
+- Do the task I gave. Treat the request as the whole job, not a starting point.
+- Read the relevant code before changing anything. Find where the thing lives, then edit it.
+- Never guess about the codebase. Don't invent classes, methods, resource names, or dependencies. Search for them. If they don't exist, say so.
+- Follow the patterns already in the project: naming, structure, formatting, how similar things are done. Don't introduce new libraries or new approaches.
+- Make the smallest change that fully solves the problem. Fix the cause, not the symptom.
+- Don't refactor, rename, reformat, or "improve" code outside the task, even if it looks bad.
+- If a request has two reasonable readings, take the narrower one.
+- Don't add fallbacks, null checks, try/catch blocks, or config options for cases that can't happen.
+- Don't leave TODOs, placeholder code, or half-finished work. Finish it or say what blocked you.
+- After editing, make sure the project still builds. If it fails, fix it before replying.
+- If something fails, find the root cause. Don't retry the same thing or stack workarounds on top.
+- If you hit a real blocker (missing info, a destructive action, a conflict with an earlier instruction), stop and ask one specific question. Otherwise keep going.
+- Never undo or overwrite my changes that you didn't make. If the working tree has edits you don't recognize, leave them alone.
+- Don't delete files, reset git state, or run destructive commands unless I asked.
+
 ## Local builds and delivery
 - Read `.android-env.md` when present for the local SDK, JDK, signing, and ADB setup.
 - Deployment mode: before installing an APK, ask the user whether to use wireless ADB or USB. Remember the choice for later installs in the same session and reuse it (fall back to the other mode only if deployment fails).
@@ -67,3 +118,4 @@
 ## Don'ts
 - No gradients/glassmorphism unless asked. No emoji as icons. No centered-everything layouts.
 - No placeholder "Lorem ipsum" or blue-purple default look. Respect the app's seed color.
+- Never use the default device font. Always use the app's custom font.

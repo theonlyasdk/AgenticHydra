@@ -2,6 +2,8 @@ package app.agentichydra
 
 import android.content.Context
 import android.content.SharedPreferences
+import android.net.ConnectivityManager
+import android.os.PowerManager
 import android.os.SystemClock
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -93,20 +95,34 @@ internal fun rememberAdvancedModelSettings(): AdvancedModelSettings {
     return settings
 }
 
+internal fun Context.isWorkPowerConstrained(): Boolean =
+    getSystemService(PowerManager::class.java)?.isPowerSaveMode == true
+
+internal fun Context.isWorkNetworkMetered(): Boolean =
+    getSystemService(ConnectivityManager::class.java)?.isActiveNetworkMetered == true
+
 /** What one request path should do about provider rate limits. */
 internal data class RateLimitPolicy(
     val prevent: Boolean = false,
     val resume: Boolean = false,
     val rpm: Int? = null,
+    val maxRetries: Int = 3,
 ) {
     companion object {
         fun forProvider(
             context: Context,
             provider: Provider,
-        ): RateLimitPolicy =
-            advancedModelSettings(context).let {
-                RateLimitPolicy(it.preventRateLimits, it.resumeOnRateLimit, it.limitFor(provider))
+            background: Boolean = false,
+        ): RateLimitPolicy {
+            val settings = advancedModelSettings(context)
+            val configured = settings.limitFor(provider)
+            val constrained = context.isWorkPowerConstrained() || (background && context.isWorkNetworkMetered())
+            return if (constrained) {
+                RateLimitPolicy(true, settings.resumeOnRateLimit, minOf(configured ?: 12, 12), maxRetries = 1)
+            } else {
+                RateLimitPolicy(settings.preventRateLimits, settings.resumeOnRateLimit, configured)
             }
+        }
     }
 }
 

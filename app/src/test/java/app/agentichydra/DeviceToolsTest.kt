@@ -134,8 +134,38 @@ class DeviceToolsTest {
                     ).getJSONObject("function")
                     .getString("name")
             }
-        assertEquals(55, names.size)
+        assertEquals(56, names.size)
         assertEquals(names.size, names.distinct().size)
         assertEquals(WorkTools.names.toSet(), names.toSet())
+    }
+
+    @Test
+    fun projectHtmlOpensWithAReadOnlyAndroidIntentTargetedAtChrome() = runBlocking {
+        val controller = Robolectric.buildActivity(Activity::class.java).setup()
+        val activity = controller.get()
+        try {
+            val project = object : ProjectFileSource {
+                override val directory = "/storage/emulated/0/project"
+                override fun open(relativePath: String): java.io.InputStream? = null
+                override fun documentUri(relativePath: String): android.net.Uri {
+                    assertEquals("web/index.html", relativePath)
+                    return android.net.Uri.parse("content://example.document/index.html")
+                }
+            }
+            DeviceTools.execute(
+                activity,
+                "open_file",
+                JSONObject().put("path", "web/index.html").put("package", "com.android.chrome"),
+                project,
+            )
+            val intent = shadowOf(activity).nextStartedActivity
+            assertEquals(Intent.ACTION_VIEW, intent.action)
+            assertEquals("com.android.chrome", intent.`package`)
+            assertEquals("text/html", intent.type)
+            assertEquals("content", intent.data?.scheme)
+            assertTrue(intent.flags and Intent.FLAG_GRANT_READ_URI_PERMISSION != 0)
+        } finally {
+            controller.pause().stop().destroy()
+        }
     }
 }

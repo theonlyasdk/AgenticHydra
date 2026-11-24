@@ -170,10 +170,14 @@ object TermuxBridge {
                         coroutineScope {
                             val poller =
                                 launch {
+                                    var previous = ""
                                     while (isActive) {
-                                        delay(LIVE_POLL_MS)
                                         val tail = readLog()
-                                        if (tail.isNotBlank()) onOutput(tail)
+                                        if (tail.isNotEmpty() && tail != previous) {
+                                            onOutput(tail)
+                                            previous = tail
+                                        }
+                                        delay(LIVE_POLL_MS)
                                     }
                                 }
                             try {
@@ -249,6 +253,15 @@ class TaskService : Service() {
         flags: Int,
         startId: Int,
     ): Int {
+        if (intent?.action == "app.agentichydra.STOP_TASK") {
+            val id = intent.data?.schemeSpecificPart
+            val work = (application as HydraApplication).models[WorkModel::class.java]
+            if (id != null) {
+                if (work.running && work.activeId == id) work.stop() else work.engine.stop(id)
+            }
+            if (!work.running && !work.engine.hasActiveRuns()) stopSelf(startId)
+            return START_NOT_STICKY
+        }
         val manager = getSystemService(NotificationManager::class.java)
         manager.createNotificationChannel(
             NotificationChannel("work", "Agent tasks", NotificationManager.IMPORTANCE_LOW),
@@ -277,13 +290,24 @@ class TaskService : Service() {
         return START_NOT_STICKY
     }
 
+    override fun onTimeout(startId: Int, fgsType: Int) {
+        val work = (application as HydraApplication).models[WorkModel::class.java]
+        if (work.running) work.stop()
+        work.engine.active.forEach { work.engine.stop(it.id) }
+        stopSelf()
+    }
+
     override fun onDestroy() {
         watcher?.cancel()
         watcher = null
         super.onDestroy()
     }
 
-    private fun render(live: TaskProgressPipe.Live = TaskProgressPipe.live.value): Notification {
+    private fun render(preview: TaskProgressPipe.Live = TaskProgressPipe.live.value): Notification {
+        val live = if (preview.running) preview else {
+            val work = (application as HydraApplication).models[WorkModel::class.java]
+            work.engine.active.firstOrNull()?.notificationPreview() ?: preview
+        }
         val open =
             PendingIntent.getActivity(
                 this,
@@ -308,7 +332,20 @@ class TaskService : Service() {
                 "Task finished. Open to review the result."
             }
         builder.setContentText(body).setStyle(Notification.BigTextStyle().bigText(body))
-        if (live.running) builder.setSubText(elapsedLabel(live.startedElapsed))
+        if (live.running) {
+            builder.setSubText(elapsedLabel(live.startedElapsed))
+            live.conversationId?.let { id ->
+                val stop = PendingIntent.getService(
+                    this,
+                    0,
+                    Intent(this, TaskService::class.java)
+                        .setAction("app.agentichydra.STOP_TASK")
+                        .setData(Uri.fromParts("hydra-task", id, null)),
+                    PendingIntent.FLAG_IMMUTABLE,
+                )
+                builder.addAction(Notification.Action.Builder(null, "Stop", stop).build())
+            }
+        }
         return builder.build()
     }
 

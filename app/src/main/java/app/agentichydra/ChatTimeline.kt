@@ -7,6 +7,7 @@ import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.MutableTransitionState
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
@@ -14,8 +15,6 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
 import androidx.compose.animation.shrinkVertically
-import androidx.compose.animation.slideInVertically
-import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -29,6 +28,7 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowForward
+import androidx.compose.material.icons.automirrored.outlined.CallSplit
 import androidx.compose.material.icons.automirrored.outlined.Undo
 import androidx.compose.material.icons.outlined.*
 import androidx.compose.material3.*
@@ -36,6 +36,7 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.MotionDurationScale
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Offset
@@ -90,8 +91,10 @@ internal fun chatTimeMarkerIds(messages: List<Message>): Set<String> {
 
 data class MessageLongPressActions(
     val onCopy: (Message) -> Unit,
-    val onRevert: (Message) -> Unit,
-    val onRegenerate: (Message) -> Unit,
+    val onRevert: ((Message) -> Unit)? = null,
+    val onRegenerate: ((Message) -> Unit)? = null,
+    val onEdit: ((Message, String) -> Unit)? = null,
+    val onBranch: ((Message) -> Unit)? = null,
 )
 
 private data class TailLayout(
@@ -129,6 +132,8 @@ fun ChatTimeline(
     val matches = remember(state.messages, query) { chatMatches(state.messages, query) }
     val matchGroups = remember(matches) { messageMatchGroups(matches) }
     var cursor by remember(state.conversationId) { mutableStateOf(0) }
+    var editingMessage by remember(state.conversationId) { mutableStateOf<Message?>(null) }
+    var editDraft by remember(state.conversationId) { mutableStateOf("") }
     val activeMatch = if (matches.isEmpty()) -1 else cursor.coerceIn(0, matches.lastIndex)
     // While tokens stream in, keep the growing tail a couple of lines clear of the composer.
     val tailClearance by animateDpAsState(
@@ -169,11 +174,19 @@ fun ChatTimeline(
         scope.launch { revealMatch(matches[index]) }
     }
 
+    val searchVisibility = remember(state.conversationId) { MutableTransitionState(false) }
+    searchVisibility.targetState = searchOpen
+
     fun closeSearch() {
-        typed = ""
-        query = ""
-        onSearchOpenChange(false)
         focusManager.clearFocus()
+        onSearchOpenChange(false)
+    }
+
+    LaunchedEffect(searchOpen, searchVisibility.isIdle) {
+        if (!searchOpen && searchVisibility.isIdle) {
+            typed = ""
+            query = ""
+        }
     }
 
     LaunchedEffect(typed) {
@@ -189,6 +202,23 @@ fun ChatTimeline(
     val atBottom by remember(listState) { derivedStateOf { !listState.canScrollForward } }
     val atTop by remember(listState) { derivedStateOf { !listState.canScrollBackward } }
     val timeMarkers = remember(state.messages) { chatTimeMarkerIds(state.messages) }
+    val toolSpans = remember(state.messages) {
+        val messages = state.messages
+        val spans = arrayOfNulls<IntRange>(messages.size)
+        var start = 0
+        while (start < messages.size) {
+            if (messages[start].role != "tool") {
+                start++
+                continue
+            }
+            var end = start + 1
+            while (end < messages.size && messages[end].role == "tool") end++
+            val span = start until end
+            for (index in span) spans[index] = span
+            start = end
+        }
+        spans
+    }
     val latestUserId = state.messages.lastOrNull { it.role == "user" }?.id
     var observedUserId by remember(state.conversationId) { mutableStateOf(latestUserId) }
     LaunchedEffect(state.conversationId, latestUserId) {
@@ -287,11 +317,10 @@ fun ChatTimeline(
     var menuById by remember { mutableStateOf<String?>(null) }
     Column(modifier) {
         AnimatedVisibility(
-            visible = searchOpen,
-            enter = slideInVertically(spring(stiffness = 520f)) { -it } +
-                expandVertically(spring(stiffness = 520f), expandFrom = Alignment.Top) +
-                fadeIn(spring(stiffness = 520f)),
-            exit = slideOutVertically(spring(stiffness = 520f)) { -it } + fadeOut(spring(stiffness = 520f)),
+            visibleState = searchVisibility,
+            modifier = Modifier.clipToBounds(),
+            enter = expandVertically(spring(stiffness = 520f), expandFrom = Alignment.Top),
+            exit = shrinkVertically(spring(stiffness = 520f), shrinkTowards = Alignment.Top),
         ) {
             ChatFindBar(
                 query = typed,
@@ -302,6 +331,7 @@ fun ChatTimeline(
                 onNext = { goToMatch(cursor + 1) },
                 onClose = { closeSearch() },
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+                active = searchOpen,
             )
         }
         Box(Modifier.fillMaxWidth().weight(1f)) {
@@ -365,11 +395,8 @@ fun ChatTimeline(
                             }
 
                             "tool" -> {
-                                var start = index
-                                var end = index
-                                while (start > 0 && state.messages[start - 1].role == "tool")start--
-                                while (end < state.messages.lastIndex && state.messages[end + 1].role == "tool")end++
-                                toolContent?.invoke(message, index - start, end - start + 1)
+                                val span = toolSpans[index]!!
+                                toolContent?.invoke(message, index - span.first, span.last - span.first + 1)
                             }
 
                             "notice" -> {
@@ -406,7 +433,11 @@ fun ChatTimeline(
                                         menuById == message.id,
                                         onCopy,
                                         messageActions,
-                                        enabled = state.streamingResponseId != message.id,
+                                        enabled = !state.running && state.streamingResponseId != message.id,
+                                        onStartEdit = { target ->
+                                            editingMessage = target
+                                            editDraft = target.text
+                                        },
                                     ) { menuById = null }
                                 }
                             }
@@ -467,6 +498,41 @@ fun ChatTimeline(
             }
 
         }
+    }
+    editingMessage?.let { target ->
+        AlertDialog(
+            onDismissRequest = { editingMessage = null },
+            title = { Text("Edit message") },
+            text = {
+                OutlinedTextField(
+                    value = editDraft,
+                    onValueChange = { editDraft = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    minLines = 2,
+                    maxLines = 8,
+                    placeholder = { Text("Message") },
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        val updated = editDraft.trim()
+                        if (updated.isNotEmpty()) {
+                            messageActions?.onEdit?.invoke(target, updated)
+                        }
+                        editingMessage = null
+                    },
+                    enabled = editDraft.trim().isNotEmpty(),
+                ) {
+                    Text("Send")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { editingMessage = null }) {
+                    Text("Cancel")
+                }
+            },
+        )
     }
 }
 
@@ -773,6 +839,7 @@ private fun MessageActionMenu(
     onCopy: (Message) -> Unit,
     actions: MessageLongPressActions? = null,
     enabled: Boolean = true,
+    onStartEdit: (Message) -> Unit = {},
     onDismiss: () -> Unit,
 ) {
     HydraOverflowMenu(expanded = expanded, onDismiss = onDismiss) {
@@ -780,14 +847,30 @@ private fun MessageActionMenu(
             onDismiss()
             onCopy(message)
         }
-        if (message.role == "assistant" && actions != null) {
-            HydraMenuItem("Regenerate", Icons.Outlined.Refresh, enabled = enabled) {
+        if (message.role == "user" && actions?.onEdit != null) {
+            HydraMenuItem("Edit", Icons.Outlined.Edit, enabled = enabled) {
                 onDismiss()
-                actions.onRegenerate(message)
+                onStartEdit(message)
             }
-            HydraMenuItem("Revert", Icons.AutoMirrored.Outlined.Undo, enabled = enabled) {
+        }
+        if (message.role == "assistant" && actions != null) {
+            actions.onRegenerate?.let { onRegenerate ->
+                HydraMenuItem("Regenerate", Icons.Outlined.Refresh, enabled = enabled) {
+                    onDismiss()
+                    onRegenerate(message)
+                }
+            }
+            actions.onRevert?.let { onRevert ->
+                HydraMenuItem("Revert", Icons.AutoMirrored.Outlined.Undo, enabled = enabled) {
+                    onDismiss()
+                    onRevert(message)
+                }
+            }
+        }
+        if ((message.role == "user" || message.role == "assistant") && actions?.onBranch != null) {
+            HydraMenuItem("Branch", Icons.AutoMirrored.Outlined.CallSplit, enabled = enabled) {
                 onDismiss()
-                actions.onRevert(message)
+                actions.onBranch.invoke(message)
             }
         }
     }

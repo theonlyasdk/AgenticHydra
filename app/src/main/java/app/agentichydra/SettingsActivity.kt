@@ -61,7 +61,7 @@ class SettingsActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         val page =
-            intent.getStringExtra("page").takeIf { it in setOf("termux", "privacy", "storage", "about", "language", "mcp") }
+            intent.getStringExtra("page").takeIf { it in setOf("termux", "privacy", "storage", "about", "language", "mcp", "notification_summaries", "usage") }
                 ?: "about"
         setContent { HydraTheme { SettingsPage(page) { finish() } } }
     }
@@ -81,8 +81,10 @@ internal fun SettingsPage(
             "termux" -> "Termux setup"
             "privacy" -> "Privacy"
             "storage" -> "Storage"
+            "usage" -> "Usage and cost"
             "language" -> "Language"
             "mcp" -> "MCP servers"
+            "notification_summaries" -> "Notification summaries"
             else -> "About"
         }
     Scaffold(
@@ -106,6 +108,10 @@ internal fun SettingsPage(
                 Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
                     TermuxSetupPage(externalPrompt)
                 }
+            } else if (page == "notification_summaries") {
+                NotificationSummarySettings()
+            } else if (page == "usage") {
+                UsageAnalyticsPage()
             } else if (page == "mcp") {
                 Box(Modifier.fillMaxSize()) {
                     McpSettingsPage()

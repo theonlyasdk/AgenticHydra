@@ -53,7 +53,11 @@ data class BackgroundRun(
     val progress: String,
     val summary: String,
     val steps: List<WorkStep>,
+    val startedElapsed: Long = android.os.SystemClock.elapsedRealtime(),
 )
+
+internal fun BackgroundRun.notificationPreview() =
+    TaskProgressPipe.Live(id, title, progress, startedElapsed, status == "Running")
 
 /**
  * Runs small read-only agent tasks beside the Work conversation: research and project
@@ -65,7 +69,7 @@ data class BackgroundRun(
 internal class BackgroundTaskEngine(
     private val client: OkHttpClient,
     private val context: Context,
-    private val projectFiles: () -> ProjectTools?,
+    private val projectFiles: (String) -> ProjectTools?,
     private val onRecord: (WorkRecord) -> Unit,
     private val onFirstRun: (String) -> Unit,
     private val onIdle: () -> Unit,
@@ -75,7 +79,11 @@ internal class BackgroundTaskEngine(
     private val jobs = mutableMapOf<String, Job>()
     private val calls = mutableMapOf<String, okhttp3.Call>()
     private val runs = mutableStateMapOf<String, BackgroundRun>()
-    private val web = WorkWeb(client) { allowsHttpWebTools(context) }
+    private val web = WorkWeb(
+        client,
+        batchConcurrency = { if (context.isWorkPowerConstrained() || context.isWorkNetworkMetered()) 1 else 2 },
+        allowHttp = { allowsHttpWebTools(context) },
+    )
 
     val active: List<BackgroundRun> get() =
         runs.values.filter { it.status == "Running" }.sortedBy {
@@ -123,15 +131,8 @@ internal class BackgroundTaskEngine(
                 directory = directory,
             )
         runs[record.id] = BackgroundRun(record.id, label, "Running", "Starting the background task…", "", emptyList())
-        TaskProgressPipe.post(
-            TaskProgressPipe.Live(
-                record.id,
-                label,
-                "Starting the background task…",
-                android.os.SystemClock.elapsedRealtime(),
-                true,
-            ),
-        )
+        val run = runs.getValue(record.id)
+        TaskProgressPipe.update { current -> if (current.running) current else run.notificationPreview() }
         onRecord(record)
         if (wasIdle) onFirstRun(record.id)
         launchRun(record, connection, instruction)
@@ -141,10 +142,16 @@ internal class BackgroundTaskEngine(
     /** Stops one running task; the run's finally block records the outcome. */
     fun stop(id: String) {
         if (runs[id]?.status == "Running") {
-            // Cancel the in-flight call first: a blocked streaming read only unblocks on cancellation.
-            calls[id]?.cancel()
             jobs[id]?.cancel(CancellationException("Stopped from the active tasks list."))
+            // Interrupt any blocking network read after marking the job cancelled.
+            calls[id]?.cancel()
         }
+    }
+
+    suspend fun stopAndAwait(id: String) {
+        val job = jobs[id]
+        stop(id)
+        job?.join()
     }
 
     /** Read-only status report the agent can poll with read_task_output. */
@@ -181,7 +188,9 @@ internal class BackgroundTaskEngine(
         history: String,
         seed: WorkRecord,
     ) {
-        runs[id] = BackgroundRun(id, title, status, progress, summary, steps)
+        runs[id] = runs.getValue(id).copy(
+            status = status, progress = progress, summary = summary, steps = steps,
+        )
         TaskProgressPipe.update { preview ->
             if (preview.conversationId == id) {
                 preview.copy(
@@ -269,8 +278,9 @@ internal class BackgroundTaskEngine(
                                         payload,
                                         provider,
                                         onCall = { active -> calls[id] = active },
+                                        usageTask = UsageTask(context, id, seed.title),
                                         retryWithoutTools = true,
-                                        rateLimit = RateLimitPolicy.forProvider(context, provider),
+                                        rateLimit = RateLimitPolicy.forProvider(context, provider, background = true),
                                         onRateLimitWait = { waitMillis ->
                                             withContext(Dispatchers.Main) {
                                                 messages =
@@ -360,7 +370,7 @@ internal class BackgroundTaskEngine(
                                         executeReadTool(
                                             name,
                                             JSONObject(argsText),
-                                            seed.projectUri != null,
+                                            seed.projectUri,
                                         )
                                     }
                                 } catch (
@@ -432,25 +442,31 @@ internal class BackgroundTaskEngine(
     private suspend fun executeReadTool(
         name: String,
         args: JSONObject,
-        hasProject: Boolean,
+        projectUri: String?,
     ): WorkToolResult {
         if (name.startsWith("mcp_")) {
+            check(app.agentichydra.mcp.McpToolRouter.registry?.isRead(name) == true) {
+                "Background tasks can only use read-only tools."
+            }
             return try {
                 val r = app.agentichydra.mcp.McpToolRouter.call(name, args)
                 WorkToolResult(r.toString(), failed = r.optBoolean("isError", false))
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 WorkToolResult("MCP tool failed: ${e.message}", failed = true)
             }
         }
+        check(name in READ_TOOLS) { "Background tasks can only use read-only tools." }
         return researchTool(web, name, args)
             ?: run {
-                if (!hasProject) {
+                if (projectUri == null) {
                     error(
                         "Select a project folder in Hydra before using project tools in background tasks.",
                     )
                 }
                 val tools =
-                    projectFiles()
+                    projectFiles(projectUri)
                         ?: error("Project access expired. Start the background task again from the conversation.")
                 tools.execute(name, args)
             }

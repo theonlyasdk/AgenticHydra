@@ -397,10 +397,12 @@ fun HydraTheme(
                 Typography(
                     displaySmall = TextStyle(fontFamily = InstrumentSerif, fontSize = 42.sp, lineHeight = 46.sp),
                     headlineMedium = TextStyle(fontFamily = InstrumentSerif, fontSize = 32.sp, lineHeight = 38.sp),
+                    headlineSmall = TextStyle(fontFamily = InstrumentSerif, fontSize = 26.sp, lineHeight = 32.sp),
                     titleLarge = TextStyle(fontFamily = InstrumentSans, fontSize = 22.sp, lineHeight = 28.sp),
                     titleMedium = TextStyle(fontFamily = InstrumentSans, fontSize = 16.sp, lineHeight = 24.sp),
                     bodyLarge = TextStyle(fontFamily = InstrumentSans, fontSize = 16.sp, lineHeight = 25.sp),
                     bodyMedium = TextStyle(fontFamily = InstrumentSans, fontSize = 14.sp, lineHeight = 21.sp),
+                    bodySmall = TextStyle(fontFamily = InstrumentSans, fontSize = 12.sp, lineHeight = 18.sp),
                     labelLarge = TextStyle(fontFamily = InstrumentSans, fontSize = 14.sp, lineHeight = 20.sp),
                     labelMedium = TextStyle(fontFamily = InstrumentSans, fontSize = 12.sp, lineHeight = 16.sp),
                     labelSmall = TextStyle(fontFamily = InstrumentSans, fontSize = 11.sp, lineHeight = 16.sp),

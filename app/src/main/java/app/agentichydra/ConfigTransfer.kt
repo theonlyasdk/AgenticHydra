@@ -202,7 +202,9 @@ internal fun applyConfig(
     settings.keys().asSequence().forEach { name ->
         val values = settings.optJSONObject(name) ?: return@forEach
         val editor = context.getSharedPreferences(name, Context.MODE_PRIVATE).edit()
-        values.keys().asSequence().forEach { key -> editor.putTyped(key, values.get(key)) }
+        values.keys().asSequence().forEach { key ->
+            if (name != "work" || key != "records") editor.putTyped(key, values.get(key))
+        }
         editor.apply()
     }
     val vault = KeyVault(context)
@@ -228,7 +230,9 @@ internal fun applyConfig(
     }
     // The models read their history once at startup, so hand them the restored lists.
     if (hydra.has("history")) chat.reloadConversations()
-    if (settings.optJSONObject("work")?.has("records") == true) models[WorkModel::class.java].reloadRecords()
+    (settings.optJSONObject("work")?.opt("records") as? String)?.let {
+        models[WorkModel::class.java].reloadRecords(it)
+    }
     settings.optJSONObject("work")?.optString("approvalMode")?.let { raw ->
         models[WorkModel::class.java].mode = runCatching { ApprovalMode.valueOf(raw) }.getOrDefault(ApprovalMode.CHANGES)
     }

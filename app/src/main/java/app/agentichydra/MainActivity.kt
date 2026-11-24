@@ -38,6 +38,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.MainScope
 import kotlinx.coroutines.cancel
@@ -183,21 +184,26 @@ fun ChatScreen(vm: HydraModel) {
     var renameTarget by remember { mutableStateOf<Conversation?>(null) }
     var deleteTarget by remember { mutableStateOf<Conversation?>(null) }
     var renameTitle by rememberSaveable { mutableStateOf("") }
-    var exportText by rememberSaveable { mutableStateOf("") }
+    var exportConversationId by rememberSaveable { mutableStateOf<String?>(null) }
     val exporter =
         rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("text/markdown")) { uri ->
-            val text = exportText
-            exportText = ""
+            val conversation = vm.pendingMarkdownExport
+                ?: vm.conversations.firstOrNull { it.id == exportConversationId }
+            vm.pendingMarkdownExport = null
+            exportConversationId = null
             if (uri != null) {
                 scope.launch {
                     try {
+                        val snapshot = conversation ?: error("Could not find the conversation to export.")
                         withContext(Dispatchers.IO) {
                             val output =
                                 context.contentResolver.openOutputStream(uri, "wt")
                                     ?: error("Could not open export file.")
-                            output.bufferedWriter(Charsets.UTF_8).use { it.write(text) }
+                            output.bufferedWriter(Charsets.UTF_8).use { snapshot.writeMarkdown(it) }
                         }
                         snackbar.showSnackbar("Conversation exported")
+                    } catch (e: CancellationException) {
+                        throw e
                     } catch (e: Exception) {
                         snackbar.showSnackbar(e.message ?: "Could not export conversation.")
                     }
@@ -288,16 +294,9 @@ fun ChatScreen(vm: HydraModel) {
                             },
                             onExport = {
                                 val conversation = vm.conversations.firstOrNull { it.id == c.id } ?: c
-                                exportText =
-                                    (
-                                        if (vm.activeId == c.id) {
-                                            conversation.copy(
-                                                messages = vm.messages,
-                                            )
-                                        } else {
-                                            conversation
-                                        }
-                                    ).exportMarkdown()
+                                vm.pendingMarkdownExport =
+                                    if (vm.activeId == c.id) conversation.copy(messages = vm.messages) else conversation
+                                exportConversationId = conversation.id
                                 exporter.launch(
                                     c.title
                                         .replace(Regex("[^\\p{L}\\p{N} ._-]"), "_")
@@ -496,6 +495,8 @@ fun ChatScreen(vm: HydraModel) {
                                 onCopy = { message -> clipboard.setText(AnnotatedString(message.text)) },
                                 onRevert = { message -> vm.revert(message.id) },
                                 onRegenerate = { message -> vm.regenerate(message.id) },
+                                onEdit = { message, updated -> vm.editMessage(message.id, updated) },
+                                onBranch = { message -> vm.branch(message.id) },
                             ),
                         searchOpen = searchOpen,
                         onSearchOpenChange = { searchOpen = it },

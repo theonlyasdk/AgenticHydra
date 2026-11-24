@@ -425,7 +425,7 @@ internal class ResponseReveal {
 }
 
 /** Drives the fade after AndroidView has installed the spans, including when the stream pauses. */
-internal class StreamingMarkdownView(context: android.content.Context) : TextView(context) {
+internal class StreamingMarkdownView(context: android.content.Context) : androidx.appcompat.widget.AppCompatTextView(context) {
     private val reveal = ResponseReveal()
     private var fadeMillis = 0
     private val revealFrame = object : Runnable {

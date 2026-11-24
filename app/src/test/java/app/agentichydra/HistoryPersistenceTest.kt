@@ -11,6 +11,8 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
+import org.robolectric.shadows.ShadowLooper
+import java.util.concurrent.TimeUnit
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [34])
@@ -74,11 +76,28 @@ class HistoryPersistenceTest {
     @Test
     fun deletingAnIdenticalWorkRecordRemovesOnlyThatEntryAndPersists() {
         val model = WorkModel(app)
+        await { !model.recordsLoading }
         model.deleteRecord(model.records.last())
         assertEquals(1, model.records.size)
-        assertEquals(1, WorkModel(app).records.size)
+        val prefs = app.getSharedPreferences("work", Context.MODE_PRIVATE)
+        await { JSONArray(prefs.getString("records", "[]")).length() == 1 }
+        val reopened = WorkModel(app)
+        await { !reopened.recordsLoading }
+        assertEquals(1, reopened.records.size)
         model.deleteRecord(model.records.single())
-        assertTrue(WorkModel(app).records.isEmpty())
+        await { JSONArray(prefs.getString("records", "[]")).length() == 0 }
+        val empty = WorkModel(app)
+        await { !empty.recordsLoading }
+        assertTrue(empty.records.isEmpty())
+    }
+
+    private fun await(ready: () -> Boolean) {
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+        while (!ready() && System.nanoTime() < deadline) {
+            ShadowLooper.idleMainLooper()
+            Thread.sleep(10)
+        }
+        assertTrue(ready())
     }
 
     @Test

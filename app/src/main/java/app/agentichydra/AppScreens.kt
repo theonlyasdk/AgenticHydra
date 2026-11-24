@@ -261,6 +261,8 @@ fun UserScreen(
                     GroupDivider()
                     SettingsEntry(Icons.Outlined.PrivacyTip, "Privacy", null) { page("privacy") }
                     GroupDivider()
+                    SettingsEntry(Icons.Outlined.BarChart, "Usage and cost", null) { page("usage") }
+                    GroupDivider()
                     SettingsEntry(Icons.Outlined.Storage, "Storage", null) { page("storage") }
                     GroupDivider()
                     SettingsEntry(Icons.Outlined.Info, "Version", appVersionName(context)) { page("about") }
@@ -296,7 +298,17 @@ fun UserScreen(
         }
     }
     if (approvals) ApprovalSheet(work) { approvals = false }
-    if (externalLinks) ToolSettingsSheet { externalLinks = false }
+    if (externalLinks) {
+        ToolSettingsSheet(
+            keepTasksRunning = work.keepTasksRunning,
+            onKeepTasksRunningChange = work::updateKeepTasksRunning,
+            onNotificationSummaries = {
+                externalLinks = false
+                page("notification_summaries")
+            },
+            onDismiss = { externalLinks = false },
+        )
+    }
 }
 
 @Composable

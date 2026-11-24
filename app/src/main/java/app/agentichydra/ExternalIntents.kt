@@ -16,13 +16,18 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.toggleable
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.outlined.OpenInNew
 import androidx.compose.material.icons.outlined.Build
 import androidx.compose.material.icons.outlined.Http
 import androidx.compose.material.icons.outlined.Language
+import androidx.compose.material.icons.outlined.Notifications
+import androidx.compose.material.icons.outlined.PlayCircleOutline
 import androidx.compose.material.icons.outlined.Shield
 import androidx.compose.material.icons.outlined.Share
 import androidx.compose.material3.Button
@@ -321,11 +326,14 @@ internal fun ToolSettingsOptions(
     onConfirmChange: (Boolean) -> Unit,
     onAllowHttpChange: (Boolean) -> Unit,
     onBuiltInBrowserChange: (Boolean) -> Unit,
+    keepTasksRunning: Boolean,
+    onKeepTasksRunningChange: (Boolean) -> Unit,
+    onNotificationSummaries: () -> Unit,
 ) {
     val cs = MaterialTheme.colorScheme
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
         ToolToggleRow(
-            shape = groupedRowShape(0, 3),
+            shape = groupedRowShape(0, 5),
             icon = Icons.Outlined.Shield,
             title = "Ask before opening",
             detail =
@@ -338,7 +346,7 @@ internal fun ToolSettingsOptions(
             onChange = onConfirmChange,
         )
         ToolToggleRow(
-            shape = groupedRowShape(1, 3),
+            shape = groupedRowShape(1, 5),
             icon = Icons.Outlined.Http,
             title = "Allow HTTP websites",
             detail =
@@ -351,7 +359,7 @@ internal fun ToolSettingsOptions(
             onChange = onAllowHttpChange,
         )
         ToolToggleRow(
-            shape = groupedRowShape(2, 3),
+            shape = groupedRowShape(2, 5),
             icon = Icons.Outlined.Language,
             title = "Built-in browser",
             detail =
@@ -363,6 +371,28 @@ internal fun ToolSettingsOptions(
             checked = state.builtInBrowser,
             onChange = onBuiltInBrowserChange,
         )
+        ToolToggleRow(
+            shape = groupedRowShape(3, 5),
+            icon = Icons.Outlined.PlayCircleOutline,
+            title = "Keep tasks running in background",
+            detail = "Show progress and a Stop button in an ongoing notification.",
+            checked = keepTasksRunning,
+            onChange = onKeepTasksRunningChange,
+        )
+        Surface(
+            onClick = onNotificationSummaries,
+            modifier = Modifier.fillMaxWidth(),
+            shape = groupedRowShape(4, 5),
+            color = cs.surfaceContainerHigh,
+        ) {
+            ListItem(
+                headlineContent = { Text("Notification summaries") },
+                supportingContent = { Text("Choose which apps Hydra summarizes.") },
+                leadingContent = { Icon(Icons.Outlined.Notifications, null, tint = cs.primary) },
+                trailingContent = { Icon(Icons.AutoMirrored.Outlined.KeyboardArrowRight, null) },
+                colors = ListItemDefaults.colors(containerColor = cs.surfaceContainerHigh),
+            )
+        }
         Spacer(Modifier.height(8.dp))
         Text(
             "Web tools still block private and local network addresses.",
@@ -404,11 +434,19 @@ private fun ToolToggleRow(
 
 /** Settings sheet for external escapes, web-tool transport, and the in-app browser. */
 @Composable
-internal fun ToolSettingsSheet(onDismiss: () -> Unit) {
+internal fun ToolSettingsSheet(
+    keepTasksRunning: Boolean,
+    onKeepTasksRunningChange: (Boolean) -> Unit,
+    onNotificationSummaries: () -> Unit,
+    onDismiss: () -> Unit,
+) {
     val context = LocalContext.current
     val state = rememberToolSettings()
     HydraBottomSheet(onDismiss = onDismiss, containerColor = MaterialTheme.colorScheme.surfaceContainer) { _ ->
-        Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp).padding(bottom = 24.dp)) {
+        Column(
+            Modifier.fillMaxWidth().verticalScroll(rememberScrollState())
+                .padding(horizontal = 16.dp).padding(bottom = 24.dp),
+        ) {
             SheetHeader(Icons.Outlined.Build, "Tool settings")
             Spacer(Modifier.height(16.dp))
             ToolSettingsOptions(
@@ -416,6 +454,9 @@ internal fun ToolSettingsSheet(onDismiss: () -> Unit) {
                 onConfirmChange = { setConfirmExternalIntents(context, it) },
                 onAllowHttpChange = { setAllowHttpWebTools(context, it) },
                 onBuiltInBrowserChange = { setBuiltInBrowser(context, it) },
+                keepTasksRunning = keepTasksRunning,
+                onKeepTasksRunningChange = onKeepTasksRunningChange,
+                onNotificationSummaries = onNotificationSummaries,
             )
         }
     }
@@ -449,7 +490,7 @@ private fun ToolSettingsPreview() {
     HydraTheme {
         Surface(color = MaterialTheme.colorScheme.surfaceContainer, modifier = Modifier.fillMaxWidth()) {
             Box(Modifier.padding(16.dp)) {
-                ToolSettingsOptions(ToolSettingsUiState(), {}, {}, {})
+                ToolSettingsOptions(ToolSettingsUiState(), {}, {}, {}, true, {}, {})
             }
         }
     }

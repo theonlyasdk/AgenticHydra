@@ -22,11 +22,15 @@ data class McpServerConfig(
     val allowPrivateUrl: Boolean = false,
     val enabled: Boolean = true,
     val disabledTools: Set<String> = emptySet(),
+    val allowedTools: Set<String>? = null,
     val bearerToken: String? = null,
     val clientId: String? = null,
     val clientSecret: String? = null,
     val redirectUri: String = "app.agentichydra://oauth/mcp/callback",
-)
+) {
+    fun permitsTool(name: String): Boolean =
+        name !in disabledTools && (allowedTools == null || name in allowedTools)
+}
 
 data class McpTool(
     val serverId: String,

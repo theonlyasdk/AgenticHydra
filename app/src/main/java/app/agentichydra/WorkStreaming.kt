@@ -66,6 +66,8 @@ internal class WorkStreamTurn(
     /** Called once a retried turn finally succeeds, so transient notices can be cleared. */
     private val onRateLimitCleared: suspend () -> Unit = {},
     private val onThought: suspend (thought: String) -> Unit = {},
+    private val usageTask: UsageTask? = null,
+    private val onToolNames: suspend (List<String>) -> Unit = {},
     private val onText: suspend (text: String) -> Unit = {},
 ) {
     /** Set when this turn answered without tools after the model rejected them. */
@@ -80,13 +82,14 @@ internal class WorkStreamTurn(
             if (rateLimit.prevent) RequestPacer.acquire(provider, rateLimit.rpm)
             try {
                 val result = runOnce()
+                UsageLedger.record(usageTask, provider, payload.optString("model"), result)
                 if (waited) onRateLimitCleared()
                 return result
             } catch (e: ProviderRateLimitException) {
                 val wait = (e.retryAfterMillis * (attempts + 1)).coerceAtMost(MAX_RATE_LIMIT_WAIT)
                 RequestPacer.noteRateLimited(provider, wait)
                 attempts++
-                if (!rateLimit.resume || attempts > MAX_RATE_LIMIT_RETRIES) {
+                if (!rateLimit.resume || attempts > rateLimit.maxRetries) {
                     throw IOException(rateLimitFailureMessage(e, wait, retriesExhausted = rateLimit.resume))
                 }
                 waited = true
@@ -250,7 +253,9 @@ internal class WorkStreamTurn(
                         }
                     }
                 }
-                delta.optJSONArray("tool_calls")?.let { toolCalls.absorb(it) }
+                delta.optJSONArray("tool_calls")?.let { deltas ->
+                    if (toolCalls.absorb(deltas)) onToolNames(toolCalls.names())
+                }
             }
 
             if (hasInlineThink && thought.isEmpty()) {
@@ -353,7 +358,6 @@ internal class WorkStreamTurn(
         const val TOOLS = "tools"
         const val TOOL_CHOICE = "tool_choice"
         const val PEEK_LIMIT = 16384L
-        const val MAX_RATE_LIMIT_RETRIES = 3
         const val MAX_RATE_LIMIT_WAIT = 300_000L
         val RETRYABLE_CODES = setOf(400, 422)
     }
@@ -364,32 +368,47 @@ internal class WorkStreamTurn(
  * streaming format: arguments arrive as text fragments, the call `id` and
  * `name` usually only arrive on the first fragment for a given `index`.
  */
-private class ToolCallBuffer {
-    private val entries = mutableMapOf<Int, JSONObject>()
+internal class ToolCallBuffer {
+    private class Entry {
+        var id = ""
+        var name = ""
+        val arguments = StringBuilder()
+    }
 
-    fun absorb(deltas: JSONArray) {
+    private val entries = mutableMapOf<Int, Entry>()
+
+    fun absorb(deltas: JSONArray): Boolean {
+        var namesChanged = false
         for (i in 0 until deltas.length()) {
             val delta = deltas.optJSONObject(i) ?: continue
             val fragment = delta.optJSONObject("function") ?: continue
 
             val index = if (delta.has("index")) delta.optInt("index") else entries.size
-            val entry = entries.getOrPut(index) { JSONObject().put("type", "function") }
-            val function = entry.optJSONObject("function") ?: JSONObject().also { entry.put("function", it) }
-
-            delta.optString("id", "").takeIf { it.isNotEmpty() }?.let { entry.put("id", it) }
-            fragment.optString("name", "").takeIf { it.isNotEmpty() }?.let { function.put("name", it) }
-            val arguments = function.optString("arguments", "") + fragment.optString("arguments", "")
-            if (arguments.isNotEmpty()) function.put("arguments", arguments)
+            val entry = entries.getOrPut(index) { Entry() }
+            delta.optString("id", "").takeIf { it.isNotEmpty() }?.let { entry.id = it }
+            fragment.optString("name", "").takeIf { it.isNotEmpty() && it != entry.name }?.let {
+                entry.name = it
+                namesChanged = true
+            }
+            entry.arguments.append(fragment.optString("arguments", ""))
         }
+        return namesChanged
     }
+
+    fun names(): List<String> = entries.toSortedMap().values.map { it.name }.filter { it.isNotEmpty() }
 
     /** Returns the buffer's calls as a JSON array, filling in missing ids. */
     fun finish(): JSONArray {
         val calls = JSONArray()
         for (index in entries.keys.sorted()) {
             val entry = entries.getValue(index)
-            if (!entry.has("id")) entry.put("id", "call_${index + 1}")
-            calls.put(entry)
+            val function = JSONObject()
+            if (entry.name.isNotEmpty()) function.put("name", entry.name)
+            if (entry.arguments.isNotEmpty()) function.put("arguments", entry.arguments.toString())
+            calls.put(
+                JSONObject().put("type", "function").put("id", entry.id.ifEmpty { "call_${index + 1}" })
+                    .put("function", function),
+            )
         }
         return calls
     }

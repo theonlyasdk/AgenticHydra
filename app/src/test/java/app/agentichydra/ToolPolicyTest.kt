@@ -19,7 +19,7 @@ class ToolPolicyTest {
 
     @Test
     fun approvalModesHaveExplicitBoundaries() {
-        listOf("read_file", "list_files", "write_file", "run_command").forEach { tool ->
+        listOf("read_file", "list_files", "write_file").forEach { tool ->
             assertTrue(ToolPolicy.approval(ApprovalMode.EVERY, tool))
             assertFalse(ToolPolicy.approval(ApprovalMode.SESSION, tool))
             assertFalse(ToolPolicy.approval(ApprovalMode.FULL, tool))
@@ -27,6 +27,14 @@ class ToolPolicyTest {
         assertFalse(ToolPolicy.approval(ApprovalMode.CHANGES, "read_file"))
         assertFalse(ToolPolicy.approval(ApprovalMode.CHANGES, "list_files"))
         assertTrue(ToolPolicy.approval(ApprovalMode.CHANGES, "write_file"))
-        assertTrue(ToolPolicy.approval(ApprovalMode.CHANGES, "run_command"))
+        ApprovalMode.entries.forEach { assertTrue(ToolPolicy.approval(it, "run_command")) }
+    }
+
+    @Test
+    fun protectsRepositoryMetadataAndCredentialsFromWrites() {
+        listOf(".git/config", "nested/.GIT/index", ".env.production", "app/local.properties", "keys/upload.jks")
+            .forEach { path -> assertTrue("Must protect $path", runCatching { ToolPolicy.requireWritablePath(path) }.isFailure) }
+        ToolPolicy.requireWritablePath("src/main/Example.kt")
+        ToolPolicy.requireWritablePath(".github/workflows/build.yml")
     }
 }

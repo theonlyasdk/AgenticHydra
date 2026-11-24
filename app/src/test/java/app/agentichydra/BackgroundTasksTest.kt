@@ -2,6 +2,8 @@ package app.agentichydra
 
 import android.app.Application
 import android.content.Context
+import android.net.ConnectivityManager
+import android.os.Looper
 import androidx.test.core.app.ApplicationProvider
 import okhttp3.mockwebserver.Dispatcher
 import okhttp3.mockwebserver.MockResponse
@@ -15,9 +17,11 @@ import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
+import org.robolectric.Shadows
 import org.robolectric.annotation.Config
 import org.robolectric.annotation.LooperMode
 import org.robolectric.shadows.ShadowLooper
+import java.time.Duration
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 
@@ -70,16 +74,21 @@ class BackgroundTasksTest {
     private lateinit var context: Context
 
     @Before
+    @Suppress("DEPRECATION")
     fun setUp() {
         server = MockWebServer()
         server.start()
         context = ApplicationProvider.getApplicationContext()
+        val connectivity = context.getSystemService(ConnectivityManager::class.java)
+        Shadows.shadowOf(connectivity)
+            .setActiveNetworkInfo(connectivity.getNetworkInfo(ConnectivityManager.TYPE_WIFI))
         context
             .getSharedPreferences("work", Context.MODE_PRIVATE)
             .edit()
             .clear()
             .commit()
         work = (context as HydraApplication).models[WorkModel::class.java]
+        pump { !work.recordsLoading }
     }
 
     @After
@@ -98,7 +107,7 @@ class BackgroundTasksTest {
     ) {
         val start = System.currentTimeMillis()
         while (!until() && System.currentTimeMillis() - start < timeoutMs) {
-            ShadowLooper.idleMainLooper()
+            Shadows.shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(10))
             Thread.sleep(10)
         }
         ShadowLooper.idleMainLooper()
@@ -215,12 +224,14 @@ class BackgroundTasksTest {
         pump { work.engine.active.size == 3 }
         assertTrue(runCatching { work.engine.start("Fourth task", "Overflow.", connection(), null, "", "") }.isFailure)
         assertEquals("Running", JSONObject(work.engine.readOutput(ids[0]).output).getString("status"))
-        work.engine.stop(ids[1])
+        work.stopTask(ids[1])
         pump { JSONObject(work.engine.readOutput(ids[1]).output).getString("status") == "Stopped" }
         assertEquals("Stopped", work.records.first { it.id == ids[1] }.status)
         assertEquals("Running", work.records.first { it.id == ids[0] }.status)
-        work.engine.stop(ids[0])
-        work.engine.stop(ids[2])
+        work.stopAndDeleteTask(ids[0])
+        pump { work.records.none { it.id == ids[0] } }
+        assertFalse(work.isTaskRunning(ids[0]))
+        work.stopTask(ids[2])
         pump { work.engine.active.isEmpty() }
     }
 
@@ -241,6 +252,7 @@ class BackgroundTasksTest {
             .putString("records", JSONArray().put(seed.json()).toString())
             .commit()
         val recovered = WorkModel(context as Application)
+        pump { !recovered.recordsLoading }
         val record = recovered.records.first { it.id == seed.id }
         assertEquals("Interrupted", record.status)
         assertEquals("Interrupted", record.steps.first().state)

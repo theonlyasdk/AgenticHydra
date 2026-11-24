@@ -64,6 +64,19 @@
             android:name=".WorkChatActivity"
             android:exported="false"
             android:windowSoftInputMode="adjustResize" />
+        <activity-alias
+            android:name=".ShareToWork"
+            android:targetActivity=".WorkChatActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <action android:name="android.intent.action.SEND_MULTIPLE" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="text/*" />
+                <data android:mimeType="image/*" />
+                <data android:mimeType="application/*" />
+            </intent-filter>
+        </activity-alias>
         <activity
             android:name=".SettingsActivity"
             android:exported="false" />
@@ -115,6 +128,45 @@
                 android:resource="@xml/file_paths" />
         </provider>
 
+        <service
+            android:name=".NewTaskTile"
+            android:exported="true"
+            android:icon="@drawable/hydra_monochrome"
+            android:label="@string/quick_new_task"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE" />
+            </intent-filter>
+        </service>
+        <service
+            android:name=".VoiceTaskTile"
+            android:exported="true"
+            android:icon="@drawable/hydra_monochrome"
+            android:label="@string/quick_voice_task"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE" />
+            </intent-filter>
+        </service>
+        <receiver
+            android:name=".WorkShortcutWidget"
+            android:exported="false"
+            android:label="@string/quick_new_task">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data android:name="android.appwidget.provider" android:resource="@xml/work_shortcut_widget" />
+        </receiver>
+
+        <service
+            android:name=".WorkNotificationListener"
+            android:exported="false"
+            android:label="Hydra notification summaries"
+            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
+            <intent-filter>
+                <action android:name="android.service.notification.NotificationListenerService" />
+            </intent-filter>
+        </service>
         <service
             android:name=".TaskService"
             android:exported="false"

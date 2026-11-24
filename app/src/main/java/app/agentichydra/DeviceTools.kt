@@ -26,7 +26,9 @@ import android.provider.CalendarContract
 import android.provider.Settings
 import androidx.core.content.ContextCompat
 import androidx.core.location.LocationManagerCompat
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONArray
 import org.json.JSONObject
@@ -50,6 +52,8 @@ internal interface ProjectFileSource {
 
     /** Opens the file at a real-path-derived relative location, or null when it does not exist. */
     fun open(relativePath: String): java.io.InputStream?
+
+    fun documentUri(relativePath: String): Uri?
 }
 
 object DeviceTools {
@@ -67,6 +71,7 @@ object DeviceTools {
             "list_apps",
             "open_app",
             "open_url",
+            "open_file",
             "open_settings",
             "set_screen_brightness",
             "get_location",
@@ -152,6 +157,13 @@ object DeviceTools {
                 "Open an HTTP(S) page, a file:/// path stored in shared storage or Hydra's own folders, or an app deep link such as youtube:// or instagram:// in the app that handles it. This does not read browser tabs or history.",
                 listOf("url"),
                 "url" to str("URL without embedded credentials, a file:/// path, or an app deep link."),
+            ),
+            tool(
+                "open_file",
+                "Open a file from the selected project using Android directly, without Termux. For Chrome, use package com.android.chrome. Leave package blank for the default viewer.",
+                listOf("path"),
+                "path" to str("Relative project file path, for example index.html."),
+                "package" to str("Optional viewer package, for example com.android.chrome."),
             ),
             tool(
                 "open_settings",
@@ -426,6 +438,32 @@ object DeviceTools {
 
                 "open_url" -> {
                     openUri(activity, args.getString("url"), project)
+                }
+
+                "open_file" -> {
+                    val source = project ?: error("Select a project folder first.")
+                    val path = ToolPolicy.parts(args.getString("path")).joinToString("/")
+                    require(path.isNotBlank()) { "Choose a project file." }
+                    val packageName = args.optString("package").trim()
+                    require(packageName.isEmpty() || packageName.matches(Regex("[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z0-9_]+)+"))) {
+                        "Use an exact Android app package name."
+                    }
+                    val uri = withContext(Dispatchers.IO) { source.documentUri(path) }
+                        ?: error("That file could not be opened from the selected project.")
+                    val extension = path.substringAfterLast('.', "").lowercase(Locale.US)
+                    val mime = if (extension in setOf("html", "htm")) {
+                        "text/html"
+                    } else {
+                        activity.contentResolver.getType(uri)
+                            ?: android.webkit.MimeTypeMap.getSingleton().getMimeTypeFromExtension(extension)
+                            ?: "application/octet-stream"
+                    }
+                    launch(
+                        activity,
+                        Intent(Intent.ACTION_VIEW).setDataAndType(uri, mime)
+                            .setPackage(packageName.ifEmpty { null })
+                            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION),
+                    )
                 }
 
                 "open_settings" -> {

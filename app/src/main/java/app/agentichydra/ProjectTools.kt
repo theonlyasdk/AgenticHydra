@@ -23,6 +23,7 @@ data class ReadImage(
 class ProjectTools(
     private val context: Context,
     private val root: DocumentFile,
+    private val journal: ToolStepJournal? = null,
 ) {
     fun resolve(
         path: String,
@@ -62,6 +63,7 @@ class ProjectTools(
 
     /** Creates a new file for a download, refusing to replace anything that already exists. */
     fun createDownloadDestination(path: String): DocumentFile {
+        ToolPolicy.requireWritablePath(path)
         val parts = ToolPolicy.parts(path)
         require(parts.isNotEmpty()) { "Choose a file path, not the project root." }
         val parent = if (parts.size == 1) root else resolve(parts.dropLast(1).joinToString("/"), create = true)
@@ -116,7 +118,9 @@ class ProjectTools(
         }
         val existing = runCatching { resolve(path) }.getOrNull()
         val before = if (existing == null) "" else read(path)
+        journal?.prepareWrite(path, existing, text)
         val file = resolve(path, true)
+        journal?.identifyFile(file)
         context.contentResolver.openOutputStream(file.uri, "wt")?.bufferedWriter(Charsets.UTF_8)?.use {
             it.write(text)
         } ?: error("Could not write file.")
@@ -168,10 +172,22 @@ class ProjectTools(
             var remaining = skip
             while (remaining > 0) {
                 val skipped = stream.skip(remaining)
-                if (skipped <= 0) break
-                remaining -= skipped
+                if (skipped > 0) {
+                    remaining -= skipped
+                } else if (stream.read() == -1) {
+                    break
+                } else {
+                    remaining--
+                }
             }
-            stream.readBytes().toString(Charsets.UTF_8)
+            val buffer = ByteArray(maxBytes)
+            var lengthRead = 0
+            while (lengthRead < buffer.size) {
+                val count = stream.read(buffer, lengthRead, buffer.size - lengthRead)
+                if (count < 0) break
+                lengthRead += count
+            }
+            String(buffer, 0, lengthRead, Charsets.UTF_8)
         }.orEmpty()
     }
 
@@ -180,6 +196,15 @@ class ProjectTools(
         args: JSONObject,
     ): WorkToolResult {
         val path = args.optString("path", "")
+        when (name) {
+            "write_file", "append_file", "replace_in_file", "apply_diff", "delete_file", "create_directory" ->
+                ToolPolicy.requireWritablePath(path)
+            "copy_file" -> ToolPolicy.requireWritablePath(args.getString("destination"))
+            "move_file" -> {
+                ToolPolicy.requireWritablePath(args.getString("source"))
+                ToolPolicy.requireWritablePath(args.getString("destination"))
+            }
+        }
         return when (name) {
             "list_files" -> {
                 val file = resolve(path)
@@ -394,12 +419,12 @@ internal fun parseDiffBlocks(diff: String): List<DiffBlock> {
         }
         when (phase) {
             1 -> {
-                oldLines.append(trimmed)
+                oldLines.append(line)
                 oldLines.append('\n')
             }
 
             2 -> {
-                newLines.append(trimmed)
+                newLines.append(line)
                 newLines.append('\n')
             }
 

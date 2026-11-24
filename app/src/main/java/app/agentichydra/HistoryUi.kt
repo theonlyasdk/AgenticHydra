@@ -283,22 +283,24 @@ fun ConversationHistoryRow(
     }
 }
 
-fun Conversation.exportMarkdown(): String =
-    buildString {
-        appendLine("# $title")
-        messages.forEach { message ->
-            if (message.role == "model") {
-                appendLine()
-                appendLine("---")
-                appendLine("Model changed: ${message.providerName} · ${message.modelName.ifBlank{message.text}}")
-            } else {
-                appendLine()
-                appendLine("## ${if (message.role == "user") "You" else "Hydra"}")
-                appendLine()
-                appendLine(message.text)
-            }
+fun Conversation.exportMarkdown(): String = buildString { writeMarkdown(this) }
+
+internal fun Conversation.writeMarkdown(output: Appendable) = with(output) {
+    appendLine("# $title")
+    messages.forEach { message ->
+        if (message.role == "model") {
+            appendLine()
+            appendLine("---")
+            appendLine("Model changed: ${message.providerName} · ${message.modelName.ifBlank{message.text}}")
+        } else {
+            appendLine()
+            appendLine("## ${if (message.role == "user") "You" else "Hydra"}")
+            appendLine()
+            appendLine(message.text)
         }
     }
+}
+
 
 @Preview(name = "History light")
 @Preview(name = "History dark", uiMode = Configuration.UI_MODE_NIGHT_YES)

@@ -117,24 +117,41 @@ internal fun parseSearchRss(xml: String): List<SearchHit> =
             )
         }.distinctBy { it.url }
 
+private class SearchResultGroup(val rows: JSONArray) {
+    private val lengths = IntArray(rows.length()) { JSONArray().put(rows.get(it)).toString().length - 2 }
+    var length = lengths.sum() + (rows.length() - 1).coerceAtLeast(0) + 2
+        private set
+
+    fun removeLast(): Int {
+        val index = rows.length() - 1
+        val removed = lengths[index] + if (index > 0) 1 else 0
+        rows.remove(index)
+        length -= removed
+        return removed
+    }
+}
+
 /** Never cut JSON in the middle of a result when the agent's tool budget is reached. */
 internal fun boundedSearchJson(
     value: JSONObject,
     maxChars: Int = 14500,
 ): String {
-    val groups =
-        value.optJSONArray("searches")?.let { a -> (0 until a.length()).map { a.getJSONObject(it) } } ?: listOf(value)
-    while (value.toString().length > maxChars) {
-        val results =
-            groups
-                .mapNotNull {
-                    it.optJSONArray(
-                        "results",
-                    )
-                }.filter { it.length() > 0 }
-                .maxByOrNull { it.toString().length } ?: break
-        results.remove(results.length() - 1)
-        value.put("truncated", true)
+    val original = value.toString()
+    if (original.length <= maxChars) return original
+    val groups = value.optJSONArray("searches")?.let { a ->
+        (0 until a.length()).map { a.getJSONObject(it) }
+    } ?: listOf(value)
+    val results = groups.mapNotNull { it.optJSONArray("results") }
+        .filter { it.length() > 0 }
+        .map(::SearchResultGroup)
+    if (results.isEmpty()) return original
+
+    value.put("truncated", true)
+    var length = value.toString().length
+    while (length > maxChars) {
+        val largest = results.maxByOrNull { it.length } ?: break
+        if (largest.rows.length() == 0) break
+        length -= largest.removeLast()
     }
     return value.toString()
 }

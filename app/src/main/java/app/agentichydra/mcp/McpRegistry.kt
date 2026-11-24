@@ -2,6 +2,7 @@ package app.agentichydra.mcp
 
 import android.content.Context
 import android.content.SharedPreferences
+import app.agentichydra.KeyVault
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -16,6 +17,9 @@ class McpRegistry(private val context: Context) { // touch
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val prefs: SharedPreferences = context.getSharedPreferences("mcp", Context.MODE_PRIVATE)
 
+    private val vault = KeyVault(context)
+    private val connectionAttempts = mutableMapOf<String, Any>()
+
     private val _states = MutableStateFlow<Map<String, McpServerState>>(emptyMap())
     val states: StateFlow<Map<String, McpServerState>> = _states.asStateFlow()
 
@@ -23,15 +27,32 @@ class McpRegistry(private val context: Context) { // touch
         load()
     }
 
+    @Synchronized
     fun load() {
+        connectionAttempts.clear()
+        _states.value.values.forEach { it.session?.close() }
         val arr = runCatching {
             JSONArray(prefs.getString("servers", "[]"))
         }.getOrDefault(JSONArray())
+        var migrated = false
         val map = linkedMapOf<String, McpServerState>()
         for (i in 0 until arr.length()) {
-            val c = configFromJson(arr.getJSONObject(i))
+            val json = arr.getJSONObject(i)
+            val id = json.getString("id")
+            for (field in listOf("bearerToken", "clientSecret")) {
+                if (json.has(field)) {
+                    json.optStringOrNull(field)?.let { vault.write(secretKey(id, field), it) }
+                    json.remove(field)
+                    migrated = true
+                }
+            }
+            val c = configFromJson(json).copy(
+                bearerToken = vault.read(secretKey(id, "bearerToken")).ifEmpty { null },
+                clientSecret = vault.read(secretKey(id, "clientSecret")).ifEmpty { null },
+            )
             map[c.id] = McpServerState(config = c)
         }
+        if (migrated) prefs.edit().putString("servers", arr.toString()).apply()
         _states.value = map
     }
 
@@ -41,71 +62,122 @@ class McpRegistry(private val context: Context) { // touch
         prefs.edit().putString("servers", arr.toString()).apply()
     }
 
+    @Synchronized
     fun addOrUpdate(config: McpServerConfig) {
         val map = _states.value.toMutableMap()
         val existing = map[config.id]
+        if (existing?.config?.bearerToken != config.bearerToken) {
+            vault.write(secretKey(config.id, "bearerToken"), config.bearerToken.orEmpty())
+        }
+        if (existing?.config?.clientSecret != config.clientSecret) {
+            vault.write(secretKey(config.id, "clientSecret"), config.clientSecret.orEmpty())
+        }
         map[config.id] = (existing ?: McpServerState(config = config)).copy(config = config)
         _states.value = map
         persist()
     }
 
+    @Synchronized
     fun remove(serverId: String) {
+        connectionAttempts.remove(serverId)
         val map = _states.value.toMutableMap()
         map[serverId]?.session?.close()
-        map.remove(serverId)
+        if (map.remove(serverId) != null) {
+            vault.write(secretKey(serverId, "bearerToken"), "")
+            vault.write(secretKey(serverId, "clientSecret"), "")
+        }
         _states.value = map
         persist()
     }
 
     fun get(serverId: String): McpServerState? = _states.value[serverId]
 
-    fun allTools(): List<McpTool> {
-        val out = mutableListOf<McpTool>()
-        for (s in _states.value.values) {
-            if (s.status != McpStatus.CONNECTED) continue
-            for (t in s.tools) {
-                if (t.originalName in s.config.disabledTools) continue
-                out.add(t)
-            }
-        }
-        return out
+    private class ToolCatalog(
+        val states: Map<String, McpServerState>,
+        val tools: List<McpTool>,
+    ) {
+        val readOnlyNames = tools.asSequence().filter { it.readOnlyHint }.map { it.namespaced() }.toSet()
+        // Each additional tool adds one separator to the nonempty built-in schema.
+        val schemaChars by lazy { tools.sumOf { it.toOpenAiSchema().toString().length.toLong() + 1 } }
     }
 
-    fun readOnlyToolNames(): Set<String> =
-        allTools().filter { it.readOnlyHint }.map { it.namespaced() }.toSet()
+    @Volatile
+    private var cachedCatalog = ToolCatalog(emptyMap(), emptyList())
+
+    private fun toolCatalog(): ToolCatalog {
+        val catalog = cachedCatalog
+        return if (catalog.states === _states.value) catalog else refreshToolCatalog()
+    }
+
+    @Synchronized
+    private fun refreshToolCatalog(): ToolCatalog {
+        val current = _states.value
+        val catalog = cachedCatalog
+        if (catalog.states === current) return catalog
+        val tools = current.values.asSequence()
+            .filter { it.status == McpStatus.CONNECTED && it.config.enabled }
+            .flatMap { state -> state.tools.asSequence().filter { state.config.permitsTool(it.originalName) } }
+            .distinctBy { it.namespaced() }
+            .toList()
+        return ToolCatalog(current, tools).also { cachedCatalog = it }
+    }
+
+    fun allTools(): List<McpTool> = toolCatalog().tools
+
+    internal val toolSchemaChars: Long get() = toolCatalog().schemaChars
+
+    fun readOnlyToolNames(): Set<String> = toolCatalog().readOnlyNames
 
     fun isRead(name: String): Boolean = name in readOnlyToolNames()
 
     fun findTool(namespaced: String): Pair<McpServerState, McpTool>? {
         for (s in _states.value.values) {
-            val t = s.tools.firstOrNull { it.namespaced() == namespaced }
+            if (s.status != McpStatus.CONNECTED || !s.config.enabled) continue
+            val t = s.tools.firstOrNull { s.config.permitsTool(it.originalName) && it.namespaced() == namespaced }
             if (t != null) return s to t
         }
         return null
     }
 
+    @Synchronized
     fun toggleTool(serverId: String, toolName: String, enabled: Boolean) {
         val state = get(serverId) ?: return
-        val disabled = state.config.disabledTools.toMutableSet()
-        if (enabled) disabled.remove(toolName) else disabled.add(toolName)
-        addOrUpdate(state.config.copy(disabledTools = disabled))
+        val config = state.config
+        val allowed = config.allowedTools
+        if (allowed != null) {
+            addOrUpdate(config.copy(allowedTools = if (enabled) allowed + toolName else allowed - toolName))
+        } else {
+            val disabled = config.disabledTools
+            addOrUpdate(config.copy(disabledTools = if (enabled) disabled - toolName else disabled + toolName))
+        }
     }
 
+    @Synchronized
     fun applyToolPreset(serverId: String, readOnlyOnly: Boolean) {
         val state = get(serverId) ?: return
-        val disabled =
-            if (readOnlyOnly) {
-                state.tools.filterNot { it.readOnlyHint }.map { it.originalName }.toSet()
-            } else {
-                emptySet()
-            }
-        addOrUpdate(state.config.copy(disabledTools = disabled))
+        val allowed = if (readOnlyOnly) {
+            state.tools.filter { it.readOnlyHint }.map { it.originalName }.toSet()
+        } else {
+            null
+        }
+        addOrUpdate(state.config.copy(disabledTools = emptySet(), allowedTools = allowed))
     }
 
+    @Synchronized
+    fun allowSelectedTools(serverId: String) {
+        val state = get(serverId) ?: return
+        val allowed = state.tools.filter { state.config.permitsTool(it.originalName) }.map { it.originalName }.toSet()
+        addOrUpdate(state.config.copy(disabledTools = emptySet(), allowedTools = allowed))
+    }
+
+    @Synchronized
     fun connect(serverId: String, onProgress: (String?, String) -> Unit = { _, _ -> }) {
         val state = _states.value[serverId] ?: return
+        val attempt = Any()
+        connectionAttempts[serverId] = attempt
         updateStatus(serverId, McpStatus.CONNECTING, null)
         scope.launch {
+            var session: McpSession? = null
             try {
                 val token =
                     state.config.bearerToken?.takeIf { it.isNotBlank() }
@@ -114,34 +186,53 @@ class McpRegistry(private val context: Context) { // touch
                     McpTransportType.REMOTE_HTTP -> HttpTransport(state.config.url, state.config.allowPrivateUrl, token)
                     McpTransportType.STDIO -> throw UnsupportedOperationException("stdio not implemented in v1")
                 }
-                val session = McpSession(state.config, transport, onProgress = { token, msg -> onProgress(token, msg) })
-                val tools = session.connect()
-                val newState = McpServerState(
-                    config = state.config,
-                    status = McpStatus.CONNECTED,
-                    tools = tools,
-                    instructions = session.serverInstructions,
-                    session = session,
-                )
-                val map = _states.value.toMutableMap()
-                map[serverId] = newState
-                _states.value = map
+                val candidate = McpSession(state.config, transport, onProgress = { token, msg -> onProgress(token, msg) })
+                session = candidate
+                val tools = candidate.connect()
+                val accepted = synchronized(this@McpRegistry) {
+                    val current = _states.value[serverId]
+                    if (current == null || connectionAttempts[serverId] !== attempt) {
+                        false
+                    } else {
+                        connectionAttempts.remove(serverId)
+                        current.session?.close()
+                        _states.value = _states.value + (serverId to current.copy(
+                            status = McpStatus.CONNECTED,
+                            tools = tools,
+                            instructions = candidate.serverInstructions,
+                            session = candidate,
+                            lastError = null,
+                        ))
+                        true
+                    }
+                }
+                if (!accepted) candidate.close()
             } catch (e: Exception) {
-                val msg = e.message ?: e.javaClass.simpleName
-                val status = if (e is McpAuthException) McpStatus.NEEDS_AUTH else McpStatus.ERROR
-                updateStatus(serverId, status, msg)
-                _states.value[serverId]?.session?.close()
+                session?.close()
+                synchronized(this@McpRegistry) {
+                    if (connectionAttempts[serverId] === attempt) {
+                        connectionAttempts.remove(serverId)
+                        val msg = e.message ?: e.javaClass.simpleName
+                        val status = if (e is McpAuthException) McpStatus.NEEDS_AUTH else McpStatus.ERROR
+                        updateStatus(serverId, status, msg)
+                        _states.value[serverId]?.session?.close()
+                    }
+                }
             }
         }
     }
 
+    @Synchronized
     fun disconnect(serverId: String) {
+        connectionAttempts.remove(serverId)
         val state = _states.value[serverId] ?: return
         state.session?.close()
-        updateStatus(serverId, McpStatus.DISCONNECTED, null)
-        val map = _states.value.toMutableMap()
-        map[serverId] = state.copy(status = McpStatus.DISCONNECTED, session = null, tools = emptyList())
-        _states.value = map
+        _states.value = _states.value + (serverId to state.copy(
+            status = McpStatus.DISCONNECTED,
+            session = null,
+            tools = emptyList(),
+            lastError = null,
+        ))
     }
 
     private fun updateStatus(serverId: String, status: McpStatus, error: String?) {
@@ -159,6 +250,8 @@ class McpRegistry(private val context: Context) { // touch
         }
     }
 
+    private fun secretKey(id: String, field: String) = "mcp_config_${id}_$field"
+
     companion object {
         fun configToJson(c: McpServerConfig): JSONObject = JSONObject().apply {
             put("id", c.id)
@@ -173,9 +266,8 @@ class McpRegistry(private val context: Context) { // touch
             put("allowPrivateUrl", c.allowPrivateUrl)
             put("enabled", c.enabled)
             put("disabledTools", JSONArray(c.disabledTools.toList()))
-            put("bearerToken", c.bearerToken)
+            c.allowedTools?.let { put("allowedTools", JSONArray(it.toList())) }
             put("clientId", c.clientId)
-            put("clientSecret", c.clientSecret)
             put("redirectUri", c.redirectUri)
         }
 
@@ -192,9 +284,10 @@ class McpRegistry(private val context: Context) { // touch
             allowPrivateUrl = o.optBoolean("allowPrivateUrl", false),
             enabled = o.optBoolean("enabled", true),
             disabledTools = (o.optJSONArray("disabledTools") ?: JSONArray()).let { a -> (0 until a.length()).mapTo(mutableSetOf()) { a.getString(it) } },
-            bearerToken = o.optStringOrNull("bearerToken"),
+            allowedTools = o.optJSONArray("allowedTools")?.let { a ->
+                (0 until a.length()).mapTo(mutableSetOf()) { a.getString(it) }
+            },
             clientId = o.optStringOrNull("clientId"),
-            clientSecret = o.optStringOrNull("clientSecret"),
             redirectUri = o.optString("redirectUri", "app.agentichydra://oauth/mcp/callback"),
         )
     }

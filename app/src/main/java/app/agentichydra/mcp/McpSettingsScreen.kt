@@ -40,6 +40,8 @@ import androidx.compose.material.icons.outlined.BugReport
 import androidx.compose.material.icons.outlined.CheckCircleOutline
 import androidx.compose.material.icons.outlined.ChevronRight
 import androidx.compose.material.icons.outlined.CloudQueue
+import androidx.compose.material.icons.outlined.Code
+import androidx.compose.material.icons.automirrored.outlined.MenuBook
 import androidx.compose.material.icons.outlined.DeleteOutline
 import androidx.compose.material.icons.outlined.ErrorOutline
 import androidx.compose.material.icons.outlined.Hub
@@ -109,7 +111,6 @@ import app.agentichydra.HydraOverflowMenu
 import app.agentichydra.horizontalFadingEdges
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -226,6 +227,7 @@ fun McpSettingsPage() {
             },
             onToggleTool = { tool, enabled -> registry.toggleTool(state.config.id, tool, enabled) },
             onPreset = { readOnlyOnly -> registry.applyToolPreset(state.config.id, readOnlyOnly) },
+            onAllowSelected = { registry.allowSelectedTools(state.config.id) },
         )
     }
 
@@ -436,8 +438,6 @@ private fun SuggestedServers(
         if (!repeated || !motionEnabled) return@LaunchedEffect
         while (true) {
             snapshotFlow { rowState.isScrollInProgress }.first { !it }
-            delay(1200)
-            if (rowState.isScrollInProgress) continue
             launch {
                 rowState.scroll {
                     var previousFrame = withFrameNanos { it }
@@ -685,6 +685,9 @@ private val suggestedServers =
         SuggestedServer("Sentry", "https://mcp.sentry.dev/mcp", "Errors and performance", icon = Icons.Outlined.BugReport),
         SuggestedServer("Figma", "https://mcp.figma.com/mcp", "Design context", icon = Icons.Outlined.Palette),
         SuggestedServer("Stripe", "https://mcp.stripe.com", "Payments and customers", icon = Icons.Outlined.Payments),
+        SuggestedServer("GitHub", "https://api.githubcopilot.com/mcp/readonly", "Repositories, issues and pull requests", McpAuthType.BEARER, Icons.Outlined.Code),
+        SuggestedServer("Context7", "https://mcp.context7.com/mcp", "Library documentation and examples", McpAuthType.NONE, Icons.AutoMirrored.Outlined.MenuBook),
+        SuggestedServer("Cloudflare Docs", "https://docs.mcp.cloudflare.com/mcp", "Cloudflare documentation", McpAuthType.NONE, Icons.Outlined.CloudQueue),
     )
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
@@ -845,7 +848,7 @@ private fun ToggleRow(
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 private fun ServerDetailSheet(
     state: McpServerState,
@@ -856,11 +859,12 @@ private fun ServerDetailSheet(
     onRemove: () -> Unit,
     onToggleTool: (String, Boolean) -> Unit,
     onPreset: (Boolean) -> Unit,
+    onAllowSelected: () -> Unit,
 ) {
     val cs = MaterialTheme.colorScheme
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val config = state.config
-    val enabledNames = state.tools.map { it.originalName }.toSet() - config.disabledTools
+    val enabledNames = state.tools.map { it.originalName }.filter(config::permitsTool).toSet()
     val readOnlyCount = state.tools.count { it.readOnlyHint }
 
     ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState) {
@@ -934,23 +938,30 @@ private fun ServerDetailSheet(
 
             HorizontalDivider()
 
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f)) {
-                    Text("Tools", style = MaterialTheme.typography.titleMedium)
-                    Text(
-                        if (state.tools.isEmpty()) {
-                            "Connect to discover this server's tools."
-                        } else {
-                            "$readOnlyCount read-only · ${state.tools.size} total"
-                        },
-                        style = MaterialTheme.typography.bodySmall,
-                        color = cs.onSurfaceVariant,
-                    )
-                }
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text("Tools", style = MaterialTheme.typography.titleMedium)
+                Text(
+                    if (state.tools.isEmpty()) {
+                        "Connect to discover this server's tools."
+                    } else {
+                        "${enabledNames.size} enabled ? $readOnlyCount read-only ? ${state.tools.size} total"
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = cs.onSurfaceVariant,
+                )
                 if (state.tools.isNotEmpty()) {
-                    AssistChip(onClick = { onPreset(true) }, label = { Text("Read-only") })
-                    Spacer(Modifier.width(8.dp))
-                    AssistChip(onClick = { onPreset(false) }, label = { Text("All") })
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        AssistChip(onClick = { onPreset(true) }, label = { Text("Read-only") })
+                        AssistChip(onClick = { onPreset(false) }, label = { Text("All") })
+                        AssistChip(
+                            onClick = onAllowSelected,
+                            enabled = config.allowedTools == null,
+                            label = { Text(if (config.allowedTools == null) "Allow selected" else "Allowlist on") },
+                        )
+                    }
+                    if (config.allowedTools != null) {
+                        Text("New tools stay off until you enable them.", style = MaterialTheme.typography.bodySmall)
+                    }
                 }
             }
 
@@ -1077,10 +1088,8 @@ private suspend fun runOAuth(context: Context, registry: McpRegistry, serverId: 
     val oauthState = auth.newState()
     val scopes = config.scopes.ifBlank { metadata.scopesSupported.firstOrNull() ?: "default" }
     val authorizeUrl = auth.buildAuthorizeUrl(metadata, clientId, redirectUri, scopes, config.url, oauthState, challenge)
-    auth.launchAuthorize(context, authorizeUrl)
-    val callback = auth.awaitCallback()
+    val callback = auth.awaitCallback(oauthState) { auth.launchAuthorize(context, authorizeUrl) }
     if (callback.error != null) error("Notion sign-in was cancelled: ${callback.error}")
-    if (callback.state != oauthState) error("Sign-in state did not match. Try again.")
     val code = callback.code ?: error("Notion did not return an authorization code.")
     val tokens = withContext(Dispatchers.IO) {
         auth.exchangeCode(metadata, clientId, code, verifier, redirectUri, config.url)

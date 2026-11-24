@@ -287,6 +287,8 @@ class HydraModel(
         private set
     var conversations by mutableStateOf<List<Conversation>>(emptyList())
         private set
+    internal var pendingMarkdownExport: Conversation? = null
+
     var activeId by mutableStateOf(UUID.randomUUID().toString())
         private set
     var busy by mutableStateOf(false)
@@ -327,7 +329,11 @@ class HydraModel(
 
     // The quiz finished during this turn, attached to the summary the model writes next.
     private var turnQuiz: QuizAttempt? = null
-    private val web = WorkWeb(client) { allowsHttpWebTools(app) }
+    private val web = WorkWeb(
+        client,
+        batchConcurrency = { if (app.isWorkPowerConstrained() || app.isWorkNetworkMetered()) 1 else 2 },
+        allowHttp = { allowsHttpWebTools(app) },
+    )
 
     // Raw API-side conversation (assistant tool calls + their results), so follow-ups stay well-formed.
     private var history = JSONArray()
@@ -695,8 +701,7 @@ class HydraModel(
         persist()
     }
 
-    fun send(input: String): Boolean {
-        if (busy || input.isBlank()) return false
+    private fun validateConnection(): Boolean {
         if (model.isBlank()) {
             error = "Choose a model from the composer first."
             return false
@@ -714,6 +719,12 @@ class HydraModel(
             error = "Use HTTPS when sending an API key."
             return false
         }
+        return true
+    }
+
+    fun send(input: String): Boolean {
+        if (busy || input.isBlank()) return false
+        if (!validateConnection()) return false
         val content =
             input.trim() + (attachment?.let { "\n\nAttached file: ${it.first}\n```\n${it.second}\n```" } ?: "")
         recordModelChange()
@@ -749,6 +760,10 @@ class HydraModel(
         val requestEndpoint = endpoint
         val requestKey = apiKey
         val requestConversationId = activeId
+        val usageTask = UsageTask(
+            context, requestConversationId,
+            conversations.firstOrNull { it.id == requestConversationId }?.title ?: "Chat",
+        )
         val rateLimit = RateLimitPolicy.forProvider(context, requestProvider)
         responseStartedAt = SystemClock.elapsedRealtime()
         responseTokens = null
@@ -871,6 +886,7 @@ class HydraModel(
                                     turnPayload,
                                     requestProvider,
                                     onCall = { active -> call = active },
+                                    usageTask = usageTask,
                                     retryWithoutTools = true,
                                     rateLimit = rateLimit,
                                     onRateLimitWait = { waitMillis ->
@@ -1145,6 +1161,54 @@ class HydraModel(
         return true
     }
 
+    /** Replace an earlier user prompt, drop later replies, and generate a fresh response. */
+    fun editMessage(
+        messageId: String,
+        newText: String,
+    ): Boolean {
+        val clean = newText.trim()
+        if (busy || clean.isEmpty()) return false
+        val index = messages.indexOfFirst { it.id == messageId && it.role == "user" }
+        if (index < 0) return false
+        if (!validateConnection()) return false
+        val updatedMessages = messages.take(index) + messages[index].copy(text = clean)
+        val keptIds = updatedMessages.mapTo(mutableSetOf()) { it.id }
+        messages = updatedMessages
+        steps = steps.filter { it.id in keptIds }
+        history = replaceLastUserPromptInHistory(sliceApiHistoryForMessages(history, updatedMessages), clean)
+        persist()
+        return beginTurn()
+    }
+
+    /** Copy the conversation up to [messageId] into a new branch and switch to it. */
+    fun branch(messageId: String): Boolean {
+        if (busy) return false
+        val index =
+            messages.indexOfFirst {
+                it.id == messageId && (it.role == "user" || it.role == "assistant")
+            }
+        if (index < 0) return false
+        val keptMessages = messages.take(index + 1)
+        val keptIds = keptMessages.mapTo(mutableSetOf()) { it.id }
+        val keptSteps = steps.filter { it.id in keptIds }
+        val keptHistory = sliceApiHistoryForMessages(history, keptMessages)
+        val currentTitle = conversations.firstOrNull { it.id == activeId }?.title.orEmpty()
+        val firstPrompt = keptMessages.firstOrNull { it.role == "user" }?.text.orEmpty()
+        val branched =
+            Conversation(
+                id = UUID.randomUUID().toString(),
+                title = branchedConversationTitle(currentTitle, firstPrompt, "Branched chat"),
+                messages = keptMessages,
+                titleSource = "manual",
+                steps = keptSteps,
+                apiHistory = keptHistory.toString(),
+            )
+        conversations = (listOf(branched) + conversations).take(100)
+        persistHistory()
+        open(branched)
+        return true
+    }
+
     /** Chat tools are read-only: research, the clock, and question wizards — never state changes. */
     private suspend fun executeChatTool(
         name: String,
@@ -1244,6 +1308,7 @@ class HydraModel(
                         reasoning,
                         namingProvider,
                         rateLimit,
+                        UsageTask(context, id, conversation.title),
                     )
                 // A model that cannot name the chat may answer `null` (or nothing): fall back to the first prompt.
                 if (title.isBlank() || title.equals("null", ignoreCase = true)) return@launch

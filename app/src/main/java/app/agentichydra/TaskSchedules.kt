@@ -245,7 +245,7 @@ internal class TaskSchedules(
                     ),
                 ).setInitialDelay((record.runAt - System.currentTimeMillis()).coerceAtLeast(0), TimeUnit.MILLISECONDS)
                 .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build())
-                .setBackoffCriteria(BackoffPolicy.LINEAR, 30, TimeUnit.SECONDS)
+                .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 30, TimeUnit.SECONDS)
                 .addTag("schedule:${record.id}")
                 .build()
         manager.enqueueUniqueWork("schedule:${record.id}:${record.revision}", ExistingWorkPolicy.KEEP, request)
@@ -484,7 +484,7 @@ class ScheduledAgentWorker(
                     }
                     val model = app.models[WorkModel::class.java]
                     work = model
-                    if (model.running || model.attaching || model.draftAttachments.isNotEmpty()) {
+                    if (model.recordsLoading || model.running || model.attaching || model.draftAttachments.isNotEmpty()) {
                         return@withContext false
                     }
                     val conversation =

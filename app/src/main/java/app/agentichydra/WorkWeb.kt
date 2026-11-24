@@ -31,6 +31,7 @@ internal fun isPublicAddress(address: InetAddress): Boolean {
 
 class WorkWeb(
     client: OkHttpClient,
+    private val batchConcurrency: () -> Int = { 2 },
     private val allowHttp: () -> Boolean = { false },
 ) {
     private val client =
@@ -241,7 +242,7 @@ class WorkWeb(
                         it.isNotBlank() && it.length <= 300
                     },
             ) { "Use one to three distinct queries of 1–300 characters." }
-            val semaphore = Semaphore(2)
+            val semaphore = Semaphore(batchConcurrency())
             val searches =
                 queries
                     .map { query ->
@@ -329,19 +330,7 @@ class WorkWeb(
                 .put("text", doc.text.substring(offset, end))
                 .put("next_offset", if (end < doc.text.length) end else JSONObject.NULL)
                 .put("links", JSONArray(doc.links.take(8)))
-        while (result.toString().length > 15000 && (result.getJSONArray("links").length() > 0)) {
-            result.getJSONArray("links").remove(result.getJSONArray("links").length() - 1)
-        }
-        // JSON escaping can make code-heavy text larger than its raw text length.
-        while (result.toString().length > 15500) {
-            val text = result.getString("text")
-            result.put("text", text.dropLast(500))
-            result.put(
-                "next_offset",
-                offset + result.getString("text").length,
-            )
-        }
-        return result.toString()
+        return boundedFetchedPage(result, offset)
     }
 
     suspend fun find(
@@ -392,6 +381,42 @@ internal fun parseSearchHtml(html: String): String =
  * Research and clock tools, offered with identical arguments and limits by chat, task, and
  * background engines. Returns null for any other name so each caller keeps its own remaining branches.
  */
+internal fun boundedFetchedPage(result: JSONObject, offset: Int): String {
+    val original = result.toString()
+    if (original.length <= 15000) return original
+    var length = original.length
+    val links = result.getJSONArray("links")
+    while (length > 15000 && links.length() > 0) {
+        val index = links.length() - 1
+        length -= JSONObject.quote(links.getString(index)).length + if (index > 0) 1 else 0
+        links.remove(index)
+    }
+
+    // Account for escaping using only the removed slice, plus its preceding character
+    // for JSON implementations that escape a slash based on what precedes it.
+    val text = result.getString("text")
+    var end = text.length
+    var offsetChars = result.get("next_offset").toString().length
+    while (length > 15500 && end > 0) {
+        var shortened = (end - 500).coerceAtLeast(0)
+        if (shortened > 0 && text[shortened - 1].isHighSurrogate() && text[shortened].isLowSurrogate()) {
+            shortened--
+        }
+        val quoteStart = (shortened - 1).coerceAtLeast(0)
+        val removedChars = JSONObject.quote(text.substring(quoteStart, end)).length -
+            JSONObject.quote(text.substring(quoteStart, shortened)).length
+        val nextOffsetChars = (offset + shortened).toString().length
+        length += nextOffsetChars - offsetChars - removedChars
+        offsetChars = nextOffsetChars
+        end = shortened
+    }
+    if (end < text.length) {
+        result.put("text", text.substring(0, end))
+        result.put("next_offset", offset + end)
+    }
+    return result.toString()
+}
+
 internal suspend fun researchTool(
     web: WorkWeb,
     name: String,

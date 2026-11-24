@@ -1,11 +1,16 @@
 package app.agentichydra
 
 import android.Manifest
+import android.app.Activity
+import android.content.ActivityNotFoundException
+import android.content.ClipData
 import android.content.Context
 import android.content.Intent
 import android.content.res.Configuration
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.speech.RecognizerIntent
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
@@ -19,13 +24,16 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.*
 import androidx.compose.animation.expandHorizontally
+import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkHorizontally
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.*
+import androidx.compose.foundation.draganddrop.dragAndDropTarget
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -39,6 +47,9 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draganddrop.DragAndDropEvent
+import androidx.compose.ui.draganddrop.DragAndDropTarget
+import androidx.compose.ui.draganddrop.toAndroidDragEvent
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.geometry.Size
@@ -48,6 +59,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.painterResource
@@ -62,13 +74,22 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.core.content.FileProvider
+import androidx.core.content.IntentCompat
 import androidx.lifecycle.Lifecycle
 import app.agentichydra.mcp.McpToolRouter
+import java.io.File
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.time.format.FormatStyle
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import org.json.JSONObject
 
 private fun openWork(
@@ -144,8 +165,10 @@ fun WorkScreen(
     val cs = MaterialTheme.colorScheme
     val context = LocalContext.current
     val externalPrompt = LocalExternalIntentPrompt.current
+    val exportScope = rememberCoroutineScope()
     var query by rememberSaveable { mutableStateOf("") }
     var options by remember { mutableStateOf<WorkRecord?>(null) }
+    var pendingSwipeDelete by remember { mutableStateOf<WorkRecord?>(null) }
     var selection by rememberSaveable { mutableStateOf(emptySet<String>()) }
     var multiOptions by rememberSaveable { mutableStateOf(false) }
     var rename by remember { mutableStateOf<WorkRecord?>(null) }
@@ -289,7 +312,9 @@ fun WorkScreen(
                             Modifier.fillParentMaxHeight().fillMaxWidth().imePadding(),
                             contentAlignment = Alignment.Center,
                         ) {
-                            if (query.isBlank()) {
+                            if (vm.recordsLoading) {
+                                CircularProgressIndicator()
+                            } else if (query.isBlank()) {
                                 Column(
                                     horizontalAlignment = Alignment.CenterHorizontally,
                                     verticalArrangement = Arrangement.spacedBy(16.dp),
@@ -345,14 +370,52 @@ fun WorkScreen(
                     val background = record.status == "Running"
                     val selected = record.id in selection
                     val rowColor = if (selected) cs.primaryContainer else cs.surfaceContainerHigh
+                    val rowShape = groupedRowShape(index, filtered.size)
                     val toggleSelection = {
                         selection = if (selected) selection - record.id else selection + record.id
                     }
-                    Surface(
-                        color = rowColor,
-                        shape = groupedRowShape(index, filtered.size),
-                        modifier =
-                            Modifier.fillMaxWidth().semantics { this.selected = selected }.combinedClickable(
+                    val dismissState =
+                        rememberSwipeToDismissBoxState(
+                            confirmValueChange = { value ->
+                                if (value == SwipeToDismissBoxValue.StartToEnd && selection.isEmpty()) {
+                                    pendingSwipeDelete = record
+                                }
+                                false
+                            },
+                        )
+                    SwipeToDismissBox(
+                        state = dismissState,
+                        modifier = Modifier.fillMaxWidth().animateItem(),
+                        enableDismissFromStartToEnd = selection.isEmpty(),
+                        enableDismissFromEndToStart = false,
+                        gesturesEnabled = selection.isEmpty(),
+                        backgroundContent = {
+                            Box(
+                                Modifier
+                                    .fillMaxSize()
+                                    .background(cs.errorContainer, rowShape)
+                                    .padding(horizontal = 20.dp),
+                                contentAlignment = Alignment.CenterStart,
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                ) {
+                                    Icon(Icons.Outlined.Delete, null, tint = cs.onErrorContainer)
+                                    Text(
+                                        "Delete",
+                                        style = MaterialTheme.typography.labelLarge,
+                                        color = cs.onErrorContainer,
+                                    )
+                                }
+                            }
+                        },
+                    ) {
+                        Surface(
+                            color = rowColor,
+                            shape = rowShape,
+                            modifier =
+                                Modifier.fillMaxWidth().semantics { this.selected = selected }.combinedClickable(
                                 onClick = {
                                     if (selection.isNotEmpty()) {
                                         toggleSelection()
@@ -366,101 +429,80 @@ fun WorkScreen(
                                 onLongClickLabel = if (selected) "Deselect task" else "Select task",
                             ),
                     ) {
-                        Box {
-                            ListItem(
-                                modifier = Modifier.padding(end = 40.dp),
-                                headlineContent = {
-                                    MarqueeTitle(
-                                        record.title,
-                                        surface = rowColor,
-                                        style = MaterialTheme.typography.workListTitle,
+                        val metadataStyle = MaterialTheme.typography.bodySmall
+                        val metadataColor = if (selected) cs.onPrimaryContainer else cs.onSurfaceVariant
+                        ListItem(
+                            headlineContent = {
+                                Text(
+                                    record.title,
+                                    style = MaterialTheme.typography.titleMedium.copy(
+                                        fontSize = 17.sp,
+                                        fontWeight = androidx.compose.ui.text.font.FontWeight.Bold,
+                                    ),
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis,
+                                )
+                            },
+                            supportingContent = {
+                                Column(Modifier.padding(top = 4.dp)) {
+                                    Text(
+                                        projectSubtitle(record.projectName, record.projectUri != null, active),
+                                        style = metadataStyle,
+                                        color = metadataColor,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
                                     )
-                                },
-                                supportingContent = {
-                                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                                            MarqueeTitle(
-                                                projectSubtitle(record.projectName, record.projectUri != null, active),
-                                                Modifier.weight(1f),
-                                                surface = rowColor,
-                                                style = MaterialTheme.typography.bodySmall,
-                                            )
-                                            val time = workTimeLabel(record.updatedAt, relativeTime)
-                                            if (time.isNotBlank()) {
-                                                Spacer(Modifier.width(12.dp))
-                                                Text(
-                                                    time,
-                                                    style = MaterialTheme.typography.labelSmall,
-                                                    color = cs.onSurfaceVariant,
-                                                )
-                                            }
-                                        }
-                                        when {
-                                            active -> {
-                                                WorkProgressLabel(
-                                                    vm.progress.ifBlank { "Thinking…" },
-                                                    rowColor,
-                                                )
-                                            }
-
-                                            background -> {
-                                                WorkProgressLabel(
-                                                    if (vm.engine.isRunning(record.id)) {
-                                                        vm.engine.progressFor(record.id).ifBlank {
-                                                            "Working…"
-                                                        }
-                                                    } else {
-                                                        "Working…"
-                                                    },
-                                                    rowColor,
-                                                )
-                                            }
-
-                                            else -> {
-                                                Text(
-                                                    record.status,
-                                                    style = MaterialTheme.typography.labelSmall,
-                                                    color = cs.workStatusColor(record.status),
-                                                )
-                                            }
-                                        }
-                                    }
-                                },
-                                leadingContent = {
                                     when {
-                                        selection.isNotEmpty() -> {
-                                            Icon(
-                                                if (selected) {
-                                                    Icons.Outlined.CheckCircle
-                                                } else {
-                                                    Icons.Outlined.RadioButtonUnchecked
-                                                },
-                                                if (selected) "Selected" else "Not selected",
-                                                Modifier.size(24.dp),
-                                                tint = if (selected) cs.primary else cs.onSurfaceVariant,
-                                            )
-                                        }
-
-                                        active || background -> {
-                                            CircularProgressIndicator(
-                                                Modifier.size(24.dp),
-                                                strokeWidth = 2.dp,
-                                            )
-                                        }
-
-                                        else -> {
-                                            Icon(Icons.Outlined.Terminal, null, tint = cs.primary)
-                                        }
+                                        active -> WorkProgressLabel(vm.progress.ifBlank { "Thinking\u2026" }, rowColor)
+                                        background -> WorkProgressLabel(vm.engine.progressFor(record.id).ifBlank { "Working\u2026" }, rowColor)
+                                        else -> Text(
+                                            listOf(record.status, workTimeLabel(record.updatedAt, relativeTime))
+                                                .filter(String::isNotBlank).joinToString(" \u00B7 "),
+                                            style = metadataStyle,
+                                            color = metadataColor,
+                                        )
                                     }
-                                },
-                                colors = ListItemDefaults.colors(containerColor = rowColor),
-                            )
-                            IconButton(
-                                onClick = {
-                                    if (selection.isNotEmpty()) multiOptions = true else options = record
-                                },
-                                modifier = Modifier.align(Alignment.CenterEnd).padding(end = 4.dp),
-                            ) { Icon(Icons.Outlined.MoreHoriz, "Task options") }
+                                }
+                            },
+                            leadingContent = {
+                                when {
+                                    selection.isNotEmpty() -> {
+                                        Icon(
+                                            if (selected) {
+                                                Icons.Outlined.CheckCircle
+                                            } else {
+                                                Icons.Outlined.RadioButtonUnchecked
+                                            },
+                                            if (selected) "Selected" else "Not selected",
+                                            Modifier.size(24.dp),
+                                            tint = if (selected) cs.primary else cs.onSurfaceVariant,
+                                        )
+                                    }
+
+                                    active || background -> {
+                                        CircularProgressIndicator(
+                                            Modifier.size(24.dp),
+                                            strokeWidth = 2.dp,
+                                        )
+                                    }
+
+                                    else -> {
+                                        Icon(Icons.Outlined.Terminal, null, tint = cs.primary)
+                                    }
+                                }
+                            },
+                            trailingContent = {
+                                Box(Modifier.fillMaxHeight(), contentAlignment = Alignment.Center) {
+                                    IconButton(onClick = {
+                                        if (selection.isNotEmpty()) multiOptions = true else options = record
+                                    }) { Icon(Icons.Outlined.MoreHoriz, "Task options") }
+                                }
+                            },
+                            colors = ListItemDefaults.colors(
+                                containerColor = rowColor,
+                                headlineColor = if (selected) cs.onPrimaryContainer else cs.onSurface,
+                            ),
+                        )
                         }
                     }
                 }
@@ -475,16 +517,48 @@ fun WorkScreen(
             )
         }
     }
+    pendingSwipeDelete?.let { record ->
+        val runningTask = vm.isTaskRunning(record.id)
+        AlertDialog(
+            onDismissRequest = { pendingSwipeDelete = null },
+            title = { Text(if (runningTask) "Stop and delete task?" else "Delete task?") },
+            text = { Text(record.title, maxLines = 2, overflow = TextOverflow.Ellipsis) },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        if (runningTask) vm.stopAndDeleteTask(record.id) else vm.deleteRecord(record)
+                        pendingSwipeDelete = null
+                    },
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = cs.error,
+                        contentColor = cs.onError,
+                    ),
+                ) {
+                    Text("Delete")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingSwipeDelete = null }) {
+                    Text("Cancel")
+                }
+            },
+        )
+    }
     options?.let { record ->
+        val runningTask = vm.isTaskRunning(record.id)
+        val optionCount = if (runningTask) 7 else 6
         HydraBottomSheet(onDismiss = { options = null }) { dismiss ->
-            var confirm by remember { mutableStateOf(false) }
+            var confirm by remember(record.id, runningTask) { mutableStateOf(false) }
             LaunchedEffect(record.id, confirm) {
                 if (confirm) {
                     delay(3500)
                     confirm = false
                 }
             }
-            Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp).padding(bottom = 24.dp)) {
+            Column(
+                Modifier.fillMaxWidth().verticalScroll(rememberScrollState())
+                    .padding(horizontal = 16.dp).padding(bottom = 24.dp),
+            ) {
                 Row(Modifier.fillMaxWidth().padding(bottom = 20.dp), verticalAlignment = Alignment.CenterVertically) {
                     MarqueeTitle(
                         record.title,
@@ -495,40 +569,38 @@ fun WorkScreen(
                     )
                 }
                 Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    TaskOptionRow(0, 6, Icons.Outlined.ChatBubbleOutline, "Open conversation") {
+                    TaskOptionRow(0, optionCount, Icons.Outlined.ChatBubbleOutline, "Open conversation") {
                         dismiss()
                         openWork(context, record.id)
                     }
-                    TaskOptionRow(1, 6, Icons.Outlined.CheckCircle, "Select task") {
+                    TaskOptionRow(1, optionCount, Icons.Outlined.CheckCircle, "Select task") {
                         dismiss()
                         selection = selection + record.id
                     }
-                    TaskOptionRow(2, 6, Icons.Outlined.Edit, "Rename") {
+                    TaskOptionRow(2, optionCount, Icons.Outlined.Edit, "Rename") {
                         dismiss()
                         title = record.title
                         rename = record
                     }
-                    TaskOptionRow(3, 6, Icons.Outlined.FolderOpen, "Change directory", enabled = !vm.running) {
+                    TaskOptionRow(3, optionCount, Icons.Outlined.FolderOpen, "Change directory", enabled = !vm.running) {
                         dismiss()
                         if (vm.viewRecord(record)) folder.launch(null)
                     }
-                    TaskOptionRow(4, 6, Icons.Outlined.Share, "Export conversation") {
+                    TaskOptionRow(4, optionCount, Icons.Outlined.Share, "Export conversation") {
                         dismiss()
-                        shareText(
-                            context,
-                            externalPrompt,
-                            "Export task",
-                            exportWorkRecord(record),
-                            mime = "text/markdown",
-                        )
+                        shareWorkRecord(exportScope, context, externalPrompt, "Export task", record)
+                    }
+                    if (runningTask) {
+                        TaskOptionRow(5, optionCount, Icons.Outlined.Stop, "Stop task") {
+                            vm.stopTask(record.id)
+                            dismiss()
+                        }
                     }
                     TaskOptionRow(
-                        5,
-                        6,
+                        optionCount - 1,
+                        optionCount,
                         Icons.Outlined.DeleteOutline,
-                        "Delete",
-                        enabled =
-                            !(vm.running && vm.activeId == record.id) && !vm.engine.isRunning(record.id),
+                        if (runningTask) "Stop and delete" else "Delete",
                         danger = true,
                         confirmDelete = confirm,
                         confirmLabel = "Tap again to confirm",
@@ -537,7 +609,7 @@ fun WorkScreen(
                             confirm = true
                         } else {
                             confirm = false
-                            vm.deleteRecord(record)
+                            vm.stopAndDeleteTask(record.id)
                             dismiss()
                         }
                     }
@@ -730,23 +802,63 @@ private fun WorkProgressLabel(
     val direction = androidx.compose.ui.platform.LocalLayoutDirection.current
     LaunchedEffect(text) { scroll.scrollTo(0) }
     Box(Modifier.fillMaxWidth().horizontalScrollFadingEdges(scroll, surface, direction).horizontalScroll(scroll)) {
-        ShimmerStatusText(text, style = MaterialTheme.typography.labelSmall, maxLines = 1)
+        ShimmerStatusText(text, style = MaterialTheme.typography.bodyMedium, maxLines = 1)
     }
 }
 
-internal fun exportWorkRecord(record: WorkRecord) =
-    "# ${record.title}\n\n" +
-        record.messages.joinToString("\n\n") { message ->
-            if (message.role == "tool") {
-                record.steps
-                    .firstOrNull {
-                        it.id == message.id
-                    }?.let { "### ${it.tool}\n\n```json\n${it.arguments}\n```\n\n```text\n${it.output}\n```" }
-                    .orEmpty()
-            } else {
-                "### ${message.role.replaceFirstChar{it.uppercase()}}\n\n${message.text}"
+private fun shareWorkRecord(
+    scope: CoroutineScope,
+    context: Context,
+    prompt: ExternalIntentPrompt?,
+    title: String,
+    record: WorkRecord,
+) {
+    openExternalIntent(context, prompt, Icons.Outlined.Share, "This will be shared with another app.", title, "Share it?") {
+        scope.launch {
+            try {
+                val uri = withContext(Dispatchers.IO) {
+                    val file = File.createTempFile("Hydra-task-", ".md", context.cacheDir)
+                    try {
+                        file.bufferedWriter(Charsets.UTF_8).use { record.writeMarkdown(it) }
+                        FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
+                    } catch (e: Exception) {
+                        file.delete()
+                        throw e
+                    }
+                }
+                val send = Intent(Intent.ACTION_SEND)
+                    .setType("text/markdown")
+                    .putExtra(Intent.EXTRA_STREAM, uri)
+                    .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    .apply { clipData = ClipData.newUri(context.contentResolver, title, uri) }
+                context.startActivity(Intent.createChooser(send, title))
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                Toast.makeText(context, "Could not share this conversation.", Toast.LENGTH_SHORT).show()
             }
         }
+    }
+}
+
+private fun WorkRecord.writeMarkdown(output: Appendable) {
+    val stepsById = steps.associateBy { it.id }
+    output.append("# ").append(title).append("\n\n")
+    messages.forEachIndexed { index, message ->
+        if (index > 0) output.append("\n\n")
+        if (message.role == "tool") {
+            stepsById[message.id]?.let { step ->
+                output.append("### ").append(step.tool)
+                    .append("\n\n```json\n").append(step.arguments)
+                    .append("\n```\n\n```text\n").append(step.output).append("\n```")
+            }
+        } else {
+            output.append("### ").append(message.role.replaceFirstChar { it.uppercase() })
+                .append("\n\n").append(message.text)
+        }
+    }
+}
+
 
 class WorkChatActivity : ComponentActivity() {
     private var conversationId = ""
@@ -758,10 +870,19 @@ class WorkChatActivity : ComponentActivity() {
         val application = application as HydraApplication
         val work = application.models[WorkModel::class.java]
         val chat = application.models[HydraModel::class.java]
-        val requested = savedInstanceState?.getString("conversationId") ?: intent.getStringExtra("conversationId")
-        if (requested != null) {
-            work.records.firstOrNull { it.id == requested }?.let { work.viewRecord(it) }
-        } else if (savedInstanceState == null && intent.getBooleanExtra("newConversation", false)) {
+        val internal = intent.component?.className == WorkChatActivity::class.java.name
+        val shared = intent.action in setOf(Intent.ACTION_SEND, Intent.ACTION_SEND_MULTIPLE)
+        if (!internal && !shared) {
+            finish()
+            return
+        }
+        val requested = savedInstanceState?.getString("conversationId")
+            ?: if (internal && !shared) intent.getStringExtra("conversationId") else null
+        val incoming = if (shared && savedInstanceState == null) intent else null
+        val voice = internal && !shared && savedInstanceState == null && intent.getBooleanExtra(QUICK_VOICE_QUERY, false)
+        if (internal && !shared && requested == null && savedInstanceState == null &&
+            intent.getBooleanExtra("newConversation", false)
+        ) {
             work.newThread()
         }
         conversationId = requested ?: work.activeId
@@ -777,7 +898,18 @@ class WorkChatActivity : ComponentActivity() {
                     LocalLinkOpener provides openLink,
                     LocalExternalIntentPrompt provides externalPrompt,
                 ) {
-                    WorkChatRoute(chat, work, conversationId) { finish() }
+                    if (work.recordsLoading && requested != null) {
+                        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                            CircularProgressIndicator()
+                        }
+                    } else {
+                        LaunchedEffect(requested) {
+                            if (requested != null && work.activeId != requested) {
+                                work.records.firstOrNull { it.id == requested }?.let { work.viewRecord(it) }
+                            }
+                        }
+                        WorkChatRoute(chat, work, conversationId, incoming, voice) { finish() }
+                    }
                     LinkSheet(linkSheet)
                     ExternalIntentHost(externalPrompt)
                 }
@@ -827,26 +959,60 @@ class WorkChatActions(
     val onDismissError: () -> Unit = {},
     val onCopy: (Message) -> Unit = {},
     val onShare: (Message) -> Unit = {},
+    val onEdit: (Message, String) -> Unit = { _, _ -> },
+    val onBranch: (Message) -> Unit = {},
     val onExport: () -> Unit = {},
     val onAttachFile: () -> Unit = {},
     val onAttachMedia: () -> Unit = {},
+    val onTemplates: () -> Unit = {},
     val onRemoveAttachment: (String) -> Unit = {},
     val onRename: () -> Unit = {},
     val onActiveTasks: () -> Unit = {},
     val onContext: () -> Unit = {},
 )
 
+private fun workClip(clip: ClipData?): Pair<String?, List<Uri>> {
+    if (clip == null) return null to emptyList()
+    val items = (0 until clip.itemCount.coerceAtMost(5)).map(clip::getItemAt)
+    val text = items.mapNotNull { it.text?.toString()?.take(32_000) }
+        .joinToString("\n").take(32_000).ifBlank { null }
+    val uris = items.mapNotNull { it.uri?.takeIf { uri -> uri.scheme == "content" } }.distinct()
+    return text to uris
+}
+
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun WorkChatRoute(
     chat: HydraModel,
     vm: WorkModel,
     id: String,
+    incoming: Intent?,
+    voice: Boolean,
     onBack: () -> Unit,
 ) {
     val context = LocalContext.current
     val clipboard = LocalClipboardManager.current
     val externalPrompt = LocalExternalIntentPrompt.current
+    val exportScope = rememberCoroutineScope()
     var draft by rememberSaveable(id) { mutableStateOf("") }
+    var templates by rememberSaveable { mutableStateOf(false) }
+    val voiceInput = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+        if (result.resultCode == Activity.RESULT_OK) {
+            result.data?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)?.firstOrNull()?.let { draft = it }
+        }
+    }
+    LaunchedEffect(voice) {
+        if (voice) {
+            try {
+                voiceInput.launch(
+                    Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
+                        .putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM),
+                )
+            } catch (_: ActivityNotFoundException) {
+                vm.error = "Voice input is unavailable on this device."
+            }
+        }
+    }
     var models by rememberSaveable { mutableStateOf(false) }
     var approvals by rememberSaveable { mutableStateOf(false) }
     var files by rememberSaveable { mutableStateOf(false) }
@@ -871,14 +1037,14 @@ private fun WorkChatRoute(
                     "New task"
                 },
                 vm.projectName,
-                vm.messages,
-                vm.steps,
+                vm.messages + vm.preparingTools.map { Message("tool", it.tool, id = it.id, createdAt = it.createdAt) },
+                vm.steps + vm.preparingTools,
                 vm.pendingApproval?.id,
                 vm.running,
                 vm.status,
                 vm.error,
                 id,
-                canSend = !engineRun,
+                canSend = !vm.recordsLoading && !engineRun,
                 attachments = vm.draftAttachments,
                 attaching = vm.attaching,
                 progress = if (engineRun) vm.engine.progressFor(id) else vm.progress,
@@ -908,6 +1074,48 @@ private fun WorkChatRoute(
         }
 
     fun activate() = vm.activeId == id || saved?.let { vm.viewRecord(it) } == true
+    val receive = rememberUpdatedState<(String?, List<Uri>, () -> Unit) -> Boolean> { text, uris, release ->
+        if ((text.isNullOrBlank() && uris.isEmpty()) || !activate()) {
+            release()
+            false
+        } else {
+            if (!text.isNullOrBlank()) draft = listOf(draft, text).filter { it.isNotBlank() }.joinToString("\n\n")
+            if (uris.isEmpty()) {
+                release()
+            } else {
+                var remaining = uris.size
+                uris.forEach { uri -> vm.attach(uri) { if (--remaining == 0) release() } }
+            }
+            true
+        }
+    }
+    LaunchedEffect(incoming) {
+        if (incoming != null) {
+            val streams = if (incoming.action == Intent.ACTION_SEND_MULTIPLE) {
+                IntentCompat.getParcelableArrayListExtra(incoming, Intent.EXTRA_STREAM, Uri::class.java).orEmpty()
+            } else {
+                listOfNotNull(IntentCompat.getParcelableExtra(incoming, Intent.EXTRA_STREAM, Uri::class.java))
+            }
+            val (clipText, clipUris) = workClip(incoming.clipData)
+            val text = incoming.getCharSequenceExtra(Intent.EXTRA_TEXT)?.toString()?.take(32_000) ?: clipText
+            val uris = (streams + clipUris).filter { it.scheme == "content" }.distinct().take(5)
+            receive.value(text, uris) {}
+        }
+    }
+    val dropTarget = remember(context) {
+        object : DragAndDropTarget {
+            override fun onDrop(event: DragAndDropEvent): Boolean {
+                val drag = event.toAndroidDragEvent()
+                val (text, uris) = workClip(drag.clipData)
+                val permission = if (uris.isEmpty()) null else (context as? Activity)?.requestDragAndDropPermissions(drag)
+                return receive.value(text, uris) { permission?.release() }
+            }
+        }
+    }
+    val dropModifier = Modifier.dragAndDropTarget(
+        shouldStartDragAndDrop = { it.toAndroidDragEvent().clipDescription != null },
+        target = dropTarget,
+    )
     LaunchedEffect(vm, id) {
         vm.toasts.collect { event ->
             val visible =
@@ -923,7 +1131,7 @@ private fun WorkChatRoute(
         }
     var askedForProject by rememberSaveable(id) { mutableStateOf(false) }
     LaunchedEffect(id) {
-        if (active && vm.projectUri == null && vm.messages.isEmpty() && !askedForProject) {
+        if (!voice && incoming == null && active && vm.projectUri == null && vm.messages.isEmpty() && !askedForProject) {
             askedForProject = true
             folder.launch(null)
         }
@@ -989,6 +1197,7 @@ private fun WorkChatRoute(
                 }
             },
             onRemoveAttachment = vm::removeAttachment,
+            onTemplates = { templates = true },
             onRename = {
                 renameTitle = state.title
                 rename = true
@@ -999,24 +1208,32 @@ private fun WorkChatRoute(
             onShare = { message ->
                 shareText(context, externalPrompt, "Share response", message.text)
             },
+            onEdit = { message, updated ->
+                if (!vm.running && activate()) vm.editMessage(message.id, updated, chat)
+            },
+            onBranch = { message ->
+                if (!vm.running) {
+                    vm.branch(id, message.id)?.let { newId -> openWork(context, newId) }
+                }
+            },
             onExport = {
                 if (state.messages.isNotEmpty()) {
                     val record =
                         WorkRecord(state.title, state.status, "", state.steps, emptyList(), id, state.messages)
-                    shareText(
-                        context,
-                        externalPrompt,
-                        "Export conversation",
-                        exportWorkRecord(record),
-                        mime = "text/markdown",
-                    )
+                    shareWorkRecord(exportScope, context, externalPrompt, "Export conversation", record)
                 }
             },
         )
-    WorkChatScreen(state, draft, { draft = it }, actions) {
-        ComposerModelControl(chat, enabled = !vm.running) {
-            models =
-                true
+    Box(dropModifier.fillMaxSize()) {
+        WorkChatScreen(state, draft, { draft = it }, actions) {
+            ComposerModelControl(chat, enabled = !vm.running) {
+                models = true
+            }
+        }
+    }
+    if (templates) {
+        WorkTemplatesSheet(onDismiss = { templates = false }) { prompt ->
+            draft = listOf(draft, prompt).filter(String::isNotBlank).joinToString("\n\n")
         }
     }
     if (contextSheet) {
@@ -1127,7 +1344,8 @@ fun WorkChatScreen(
     val showMentions = mention != null && state.hasProject && !mentionDismissed
     BackHandler(enabled = showMentions) { mentionDismissed = true }
     val canResume =
-        !state.running && (state.status == "Cancelled" || state.status == "Failed") && draft.isBlank() && state.attachments.isEmpty()
+        !state.running && state.status in setOf("Interrupted", "Cancelled", "Failed") &&
+            draft.isBlank() && state.attachments.isEmpty()
     val canSendMessage =
         state.running ||
             (
@@ -1135,8 +1353,10 @@ fun WorkChatScreen(
                     !state.attaching &&
                     (draft.isNotBlank() || state.attachments.isNotEmpty() || canResume)
             )
+    val focusManager = LocalFocusManager.current
     Scaffold(containerColor = cs.background, topBar = {
         TopAppBar(
+            expandedHeight = if (LocalDensity.current.fontScale > 1.15f) 64.dp else 56.dp,
             title = {
                 Surface(
                     onClick = actions.onRename,
@@ -1148,11 +1368,11 @@ fun WorkChatScreen(
                             .heightIn(min = 48.dp)
                             .semantics { contentDescription = "Rename task" },
                 ) {
-                    Column {
+                    Column(verticalArrangement = Arrangement.Center) {
                         MarqueeTitle(state.title, style = MaterialTheme.typography.titleMedium, surface = cs.background)
                         MarqueeTitle(
                             projectSubtitle(state.project, state.hasProject, state.running),
-                            style = MaterialTheme.typography.labelSmall,
+                            style = MaterialTheme.typography.bodySmall,
                             color = cs.onSurfaceVariant,
                             surface = cs.background,
                         )
@@ -1167,7 +1387,10 @@ fun WorkChatScreen(
                 HintIconButton(
                     if (searchOpen) "Close search" else "Search in conversation",
                     Icons.Outlined.Search,
-                    onClick = { searchOpen = !searchOpen },
+                    onClick = {
+                        if (searchOpen) focusManager.clearFocus()
+                        searchOpen = !searchOpen
+                    },
                 )
                 Box {
                     HintIconButton("Task options", Icons.Outlined.MoreHoriz, onClick = { menu = true })
@@ -1222,12 +1445,16 @@ fun WorkChatScreen(
                 ErrorBanner(
                     it,
                     onDismiss = actions.onDismissError,
-                    actionLabel = if (!state.running) "Continue" else null,
-                    onAction = if (!state.running) actions.onResume else null,
+                    actionLabel = if (!state.running && !canResume) "Continue" else null,
+                    onAction = if (!state.running && !canResume) actions.onResume else null,
                 )
                 Spacer(Modifier.height(8.dp))
             }
-            if (!searchOpen) {
+            AnimatedVisibility(
+                visible = !searchOpen,
+                enter = expandVertically(spring(stiffness = 520f), expandFrom = Alignment.Bottom),
+                exit = shrinkVertically(spring(stiffness = 520f), shrinkTowards = Alignment.Bottom),
+            ) {
                 Column {
                     if (showMentions) {
                         mention?.let { active ->
@@ -1300,7 +1527,7 @@ fun WorkChatScreen(
                                     }, enabled = !state.running && state.canSend) {
                                         Icon(
                                             Icons.Outlined.Add,
-                                            "Add attachment or change directory",
+                                            "Attachments and prompt templates",
                                         )
                                     }
                                     HydraOverflowMenu(attachmentMenu, { attachmentMenu = false }) {
@@ -1312,6 +1539,10 @@ fun WorkChatScreen(
                                             attachmentMenu = false
                                             actions.onAttachMedia()
                                         }
+                                        HydraMenuItem("Prompt templates", Icons.Outlined.Description) {
+                                            attachmentMenu = false
+                                            actions.onTemplates()
+                                        }
                                         HydraMenuItem("Change directory", Icons.Outlined.CreateNewFolder) {
                                             attachmentMenu = false
                                             actions.onProject()
@@ -1319,28 +1550,21 @@ fun WorkChatScreen(
                                     }
                                 }
                                 Box(Modifier.weight(1f)) { modelControl() }
-                                FilledIconButton(
-                                    onClick =
-                                        when {
-                                            state.running -> actions.onStop
-                                            canResume -> actions.onResume
-                                            else -> actions.onSend
-                                        },
-                                    enabled = canSendMessage,
-                                    modifier = Modifier.size(48.dp),
-                                ) {
-                                    Icon(
-                                        when {
-                                            state.running -> Icons.Outlined.Stop
-                                            canResume -> Icons.Outlined.PlayArrow
-                                            else -> Icons.Outlined.ArrowUpward
-                                        },
-                                        when {
-                                            state.running -> "Stop task"
-                                            canResume -> "Resume task"
-                                            else -> "Send task message"
-                                        },
-                                    )
+                                if (canResume) {
+                                    Button(onClick = actions.onResume, enabled = canSendMessage) {
+                                        Text("Continue")
+                                    }
+                                } else {
+                                    FilledIconButton(
+                                        onClick = if (state.running) actions.onStop else actions.onSend,
+                                        enabled = canSendMessage,
+                                        modifier = Modifier.size(48.dp),
+                                    ) {
+                                        Icon(
+                                            if (state.running) Icons.Outlined.Stop else Icons.Outlined.ArrowUpward,
+                                            if (state.running) "Stop task" else "Send task message",
+                                        )
+                                    }
                                 }
                             }
                         }
@@ -1388,6 +1612,12 @@ fun WorkChatScreen(
                     actions.onCopy,
                     actions.onShare,
                     modifier = Modifier.widthIn(max = 760.dp).fillMaxSize(),
+                    messageActions =
+                        MessageLongPressActions(
+                            onCopy = actions.onCopy,
+                            onEdit = actions.onEdit,
+                            onBranch = actions.onBranch,
+                        ),
                     searchOpen = searchOpen,
                     onSearchOpenChange = { searchOpen = it },
                     onViewQuiz = { message -> message.quiz?.let { QuizResultActivity.open(context, it) } },
@@ -1454,7 +1684,8 @@ fun WorkToolEntry(
     val args = remember(step.arguments) { runCatching { JSONObject(step.arguments) }.getOrDefault(JSONObject()) }
     val label = remember(step.tool, step.arguments) { toolLabel(step.tool, args) }
     val title = if (steps.size > 1) "$label ×${steps.size}" else label
-    val running = steps.any { it.state == "Running" }
+    val preparing = steps.any { it.state == "Preparing" }
+    val running = preparing || steps.any { it.state == "Running" }
     val failed = steps.any { it.state == "Failed" }
     val pendingStep = steps.firstOrNull { it.id == pendingStepId }
     val icon =
@@ -1501,7 +1732,7 @@ fun WorkToolEntry(
             0
         }
     val waitLabel = if (waitSeconds < 60) "${waitSeconds}s" else "${waitSeconds / 60}m ${waitSeconds % 60}s"
-    val rowTitle = if (waiting) "$title · $waitLabel" else title
+    val rowTitle = if (preparing) "Preparing ${humanizedLabel(step.tool).lowercase()}" else if (waiting) "$title · $waitLabel" else title
     Column(Modifier.fillMaxWidth().testTag("work-tool-${steps.first().id}")) {
         Surface(color = cs.background, shape = MaterialTheme.shapes.extraSmall) {
             Row(
@@ -1772,6 +2003,7 @@ internal fun toolLabel(
         "list_scheduled_tasks" -> "Check scheduled tasks"
         "update_scheduled_task" -> "Update a schedule"
         "cancel_scheduled_task" -> "Cancel a schedule"
+        "open_file" -> "Open $path"
         in DeviceTools.names -> humanizedLabel(name)
         "list_files" -> "List ${path.ifBlank{"project files"}}"
         "list_files_recursive" -> "List files recursively in ${path.ifBlank{"project"}}"

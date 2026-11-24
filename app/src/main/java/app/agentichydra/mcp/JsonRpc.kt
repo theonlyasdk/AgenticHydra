@@ -1,6 +1,5 @@
 package app.agentichydra.mcp
 
-import org.json.JSONArray
 import org.json.JSONObject
 import java.util.concurrent.atomic.AtomicInteger
 
@@ -27,7 +26,7 @@ object JsonRpc {
     fun response(id: Any?, result: JSONObject? = null, error: JSONObject? = null): JSONObject =
         JSONObject().apply {
             put("jsonrpc", "2.0")
-            put("id", id)
+            put("id", id ?: JSONObject.NULL)
             if (error != null) put("error", error) else put("result", result ?: JSONObject())
         }
 

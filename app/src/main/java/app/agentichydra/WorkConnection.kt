@@ -33,7 +33,8 @@ internal data class WorkConnection(
             context: Context,
             saved: JSONObject,
         ): WorkConnection {
-            val provider = Provider.valueOf(saved.getString("provider"))
+            val provider = Provider.entries.firstOrNull { it.name == saved.optString("provider") }
+                ?: error("The saved provider is no longer available. Update this schedule using the current connection.")
             val endpoint = saved.getString("endpoint")
             val prefs = context.getSharedPreferences("hydra", Context.MODE_PRIVATE)
             val current =
